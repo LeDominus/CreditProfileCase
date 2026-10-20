@@ -91,3 +91,69 @@ def test_full_flow_recommend_choose_confirm():
     assert not at.exception
     assert len(at.session_state["applications"]) == 1
     assert at.session_state["show_confirm"] is False
+
+
+def _submit_default_application(at):
+    """Подбор -> выбор продукта -> подтверждение отправки заявки."""
+    at.button(key="chat_recommend").click()
+    at.run()
+    assert not at.exception
+    recs = at.session_state["recommendations"]
+    at.button(key=f"chat_choose_{recs[0]['id']}").click()
+    at.run()
+    at.checkbox[0].check()
+    at.run()
+    confirm_buttons = [b for b in at.button if "Подтвердить и отправить" in (b.label or "")]
+    confirm_buttons[0].click()
+    at.run()
+    assert not at.exception
+    return at.session_state["applications"][0]
+
+
+def test_full_path_scoring_confirm_issue():
+    """Консультация -> профиль -> скоринг (approved) -> финальное подтверждение -> выдача."""
+    at = make_app()
+    at.session_state["profile"].update(
+        {
+            "business_age_months": 36,
+            "monthly_revenue": 800_000,
+            "monthly_profit": 150_000,
+        }
+    )
+
+    application = _submit_default_application(at)
+    assert application["status"] == "approved"
+    assert application["score"] >= 70
+    assert application["decision_details"]["explanation"]
+
+    # финальное подтверждение клиента -> выдача (смоделирована)
+    confirm = [b for b in at.button if b.key and b.key.startswith("app_confirm_")]
+    assert confirm, "кнопка подтверждения решения должна рендериться"
+    confirm[0].click()
+    at.run()
+    assert not at.exception
+    assert at.session_state["applications"][0]["status"] == "issued"
+
+
+def test_needs_info_then_rescore():
+    """Профиль без финансовых данных -> needs_info -> уточнение -> повторный скоринг."""
+    at = make_app()
+
+    application = _submit_default_application(at)
+    assert application["status"] == "needs_info"
+    assert "monthly_revenue" in application["decision_details"]["missing_fields"]
+
+    # клиент уточняет данные в профиле и отправляет заявку на повторный скоринг
+    at.session_state["profile"].update(
+        {
+            "business_age_months": 36,
+            "monthly_revenue": 800_000,
+            "monthly_profit": 150_000,
+        }
+    )
+    rescore = [b for b in at.button if b.key and b.key.startswith("app_rescore_")]
+    assert rescore, "кнопка повторного скоринга должна рендериться"
+    rescore[0].click()
+    at.run()
+    assert not at.exception
+    assert at.session_state["applications"][0]["status"] == "approved"

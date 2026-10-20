@@ -1,5 +1,5 @@
-from src.config.products import PRODUCTS
-from src.core.credit_calc.calc_payment import calculate_annuity_payment
+﻿from src.config.products import PRODUCTS
+from src.core.calc_payment import calculate_annuity_payment
 
 MAX_RECOMMEND_PRODUCTS = 3
 

@@ -13,7 +13,9 @@ def calculate_annuity_payment(credit_sum: Decimal, annual_rate: float, months: i
         raise ValueError("Годовая процентная ставка не может быть меньше или равна нулю")
     if months <= 0:
         raise ValueError("Число месяцев не может быть меньше или равно нулю")
-    
+
+    credit_sum = float(credit_sum)
+
     monthly_rate = annual_rate / 12 / 100
     coeff = (monthly_rate * (1 + monthly_rate) ** months) / ((1 + monthly_rate) ** months - 1)
 

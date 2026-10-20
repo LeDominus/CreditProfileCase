@@ -1,8 +1,10 @@
 import logging
 import os
 import re
+import sys
 import time
 import uuid
+from pathlib import Path
 from dotenv import load_dotenv
 import requests
 import streamlit as st
@@ -10,6 +12,11 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 load_dotenv()
+
+# скоринговая модель и аннуитетный расчёт — общие модули с backend
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.core.scoring import score_application
+from src.core.calc_payment import calculate_annuity_payment
 
 PRODUCTS = [
     {
@@ -88,9 +95,15 @@ logging.basicConfig(
 
 STATUS_LABELS = {
     "draft": ("Черновик", "⚪"),
+    "submitted": ("Отправлена · демо", "🔵"),
+    "scoring": ("На скоринге · демо", "🟣"),
+    "approved": ("Одобрена · демо", "🟢"),
+    "approved_with_changes": ("Одобрена с изменениями · демо", "🟡"),
+    "rejected": ("Отказ · демо", "🔴"),
+    "needs_info": ("Нужны данные · демо", "🟠"),
+    "issued": ("Выдана · симуляция", "✅"),
     "demo_received": ("Заявка получена · демо", "🔵"),
     "demo_review": ("Демо-проверка", "🟠"),
-    "submitted": ("Отправлена · демо", "🔵"),
     "error": ("Ошибка", "🔴"),
 }
 
@@ -104,16 +117,21 @@ def money(value):
 
 
 def payment_calculation(principal, annual_rate, months):
+    """Аннуитетный расчёт через общий модуль backend (src/core/calc_payment.py).
+
+    Возвращает ежемесячный платёж, итоговую сумму выплат и переплату.
+    Значения совпадают с расчётом, который backend сохраняет в заявке.
+    """
     principal = Decimal(str(principal))
     months = int(months)
-    rate = Decimal(str(annual_rate)) / Decimal("1200")
-    if months <= 0:
+    rate = Decimal(str(annual_rate))
+    if months <= 0 or principal <= 0:
         return Decimal("0"), Decimal("0"), Decimal("0")
     if rate == 0:
+        # беспроцентный период — сумма делится равными долями
         monthly = principal / months
     else:
-        factor = (Decimal("1") + rate) ** months
-        monthly = principal * rate * factor / (factor - Decimal("1"))
+        monthly = Decimal(str(calculate_annuity_payment(principal, float(rate), months)))
     monthly = monthly.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     total = (monthly * months).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     overpayment = total - principal
@@ -205,6 +223,16 @@ def api_send_message(conversation_id, content, profile_id=None, role: str = "use
     )
 
 
+def api_get_conversations() -> dict:
+    """GET /api/conversations — список диалогов, свежие сверху."""
+    return api_request("GET", "/api/conversations")
+
+
+def api_get_conversation_messages(conversation_id) -> dict:
+    """GET /api/conversations/{id}/messages — все сообщения диалога."""
+    return api_request("GET", f"/api/conversations/{conversation_id}/messages")
+
+
 def api_get_recommendations(profile: dict) -> dict:
     """POST /api/recommendations — подбор продуктов под профиль."""
     return api_request("POST", "/api/recommendations", json=profile)
@@ -234,6 +262,39 @@ def api_calc_profile_payment(profile_id) -> dict:
 def api_get_products() -> list:
     """GET /api/products — каталог кредитных продуктов с backend."""
     return api_request("GET", "/api/products")
+
+
+def api_create_application(profile_id, product_id, amount, term) -> dict:
+    """POST /api/applications — создать заявку на backend."""
+    return api_request(
+        "POST",
+        "/api/applications",
+        json={
+            "profile_id": profile_id,
+            "product_id": product_id,
+            "requested_amount": amount,
+            "term_months": term,
+        },
+    )
+
+
+def api_score_application(application_id) -> dict:
+    """POST /api/applications/{id}/scoring — скоринг заявки на backend."""
+    return api_request("POST", f"/api/applications/{application_id}/scoring")
+
+
+def api_confirm_application(application_id) -> dict:
+    """POST /api/applications/{id}/confirm — финальное подтверждение заявки."""
+    return api_request(
+        "POST", f"/api/applications/{application_id}/confirm", json={"confirmed": True}
+    )
+
+
+WELCOME_MESSAGE = (
+    "Здравствуйте! Я ИИ-ассистент по подбору кредитных продуктов для малого и "
+    "среднего бизнеса. Расскажите, для чего вам нужно финансирование, какая "
+    "сумма требуется и на какой срок."
+)
 
 
 def init_state():
@@ -286,16 +347,63 @@ def create_conversation():
         },
     )
     st.session_state.active_conversation_id = conversation_id
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Здравствуйте! Я ИИ-ассистент по подбору кредитных продуктов для малого и среднего бизнеса. Расскажите, для чего вам нужно финансирование, какая сумма требуется и на какой срок.",
-        }
-    ]
+    st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
     st.session_state.recommendations = None
     st.session_state.show_confirm = False
     st.session_state.selection_unlocked = False
     st.session_state.awaiting_reply = False
+
+
+def load_conversation_messages(conversation_id):
+    """Загрузка сообщений диалога с backend в ленту чата (live-режим)."""
+    try:
+        result = api_get_conversation_messages(conversation_id)
+    except requests.RequestException as exc:
+        st.warning(f"Не удалось загрузить историю диалога: {exc}")
+        return
+    messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in result.get("messages") or []
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+    if not messages:
+        # пустой диалог на backend — показываем стандартное приветствие
+        messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+    st.session_state.messages = messages
+    # заголовок — по первому сообщению пользователя (как при живом диалоге)
+    first_user = next((m["content"] for m in messages if m["role"] == "user"), None)
+    if first_user:
+        conversation = next(
+            (c for c in st.session_state.conversations if c["id"] == conversation_id),
+            None,
+        )
+        if conversation:
+            conversation["title"] = first_user[:28] + ("…" if len(first_user) > 28 else "")
+
+
+def restore_conversations():
+    """Восстановление истории диалогов с backend после перезагрузки страницы."""
+    try:
+        result = api_get_conversations()
+    except requests.RequestException as exc:
+        logger.warning("История диалогов не получена с backend: %s", exc)
+        return
+    remote = result.get("conversations") or []
+    if not remote:
+        return
+    st.session_state.conversations = [
+        {
+            "id": str(conv["id"]),
+            "title": "Диалог · "
+            + datetime.fromisoformat(conv["created_at"]).strftime("%d.%m %H:%M"),
+            "created_at": datetime.fromisoformat(conv["created_at"]).strftime("%d.%m.%Y %H:%M"),
+        }
+        for conv in remote
+    ]
+    # активным делаем самый свежий диалог и подгружаем его сообщения
+    st.session_state.active_conversation_id = st.session_state.conversations[0]["id"]
+    load_conversation_messages(st.session_state.active_conversation_id)
+    logger.info("История диалогов восстановлена с backend: %d шт.", len(remote))
 
 
 def calculate_match(product, profile):
@@ -347,40 +455,144 @@ def get_recommendations():
         st.session_state.selected_product_id = results[0]["id"]
 
 
+def ensure_backend_profile():
+    """Идентификатор профиля на backend: создаёт профиль при первом обращении."""
+    if st.session_state.backend_profile_id is not None:
+        return st.session_state.backend_profile_id
+    profile_data = {
+        key: value for key, value in st.session_state.profile.items() if value is not None
+    }
+    # POST /api/profile требует industry и funding_purpose (в БД они NOT NULL),
+    # но в начале диалога они ещё не извлечены — ставим нейтральные заглушки;
+    # LLM-конвейер перезапишет их реальными значениями из сообщений пользователя.
+    profile_data.setdefault("industry", "Не указано")
+    profile_data.setdefault("funding_purpose", "Не указано")
+    result = api_create_profile(profile_data)
+    st.session_state.backend_profile_id = result.get("id")
+    return st.session_state.backend_profile_id
+
+
+def run_local_scoring(product, amount, term, monthly):
+    """Скоринг той же моделью, что на backend (src/core/scoring.py)."""
+    result = score_application(
+        st.session_state.profile, product, int(amount), int(term), float(monthly)
+    )
+    return result.to_dict()
+
+
 def submit_application(product, amount, term):
+    """Создание заявки и скоринг: консультация -> профиль -> скоринг -> решение."""
     monthly, total, overpayment = payment_calculation(amount, product["rate"], term)
-    # Эндпоинт заявок на backend пока не реализован (в main.py есть
-    # /api/profile/{id}/payment, но нет /api/applications) — заявка
-    # фиксируется локально, в session_state.
+    scoring = None
     application_id = str(uuid.uuid4())[:8].upper()
     if not DEMO_MODE:
-        logger.warning(
-            "POST /api/applications не реализован на backend — заявка №%s сохранена локально",
-            application_id,
-        )
-        status = "submitted"
+        try:
+            profile_id = ensure_backend_profile()
+            created = api_create_application(
+                profile_id, product["id"], int(amount), int(term)
+            )
+            application = created.get("application") or {}
+            application_id = application.get("id", application_id)
+            scored = api_score_application(application_id)
+            application = scored.get("application") or application
+            scoring = scored.get("scoring")
+            status = application.get("status", "submitted")
+        except requests.RequestException as exc:
+            logger.error("Не удалось провести заявку через backend: %s", exc)
+            st.error(f"Заявка не отправлена: backend недоступен ({exc}).")
+            return False
     else:
-        status = "demo_received"
-    application = {
+        scoring = run_local_scoring(product, amount, term, monthly)
+        status = scoring.get("decision", "demo_received")
+
+    application_record = {
         "id": application_id,
         "product_name": product["name"],
         "product_id": product["id"],
-        "amount": amount,
-        "term": term,
+        "amount": int(amount),
+        "term": int(term),
         "monthly_payment": float(monthly),
         "total_repayment": float(total),
         "overpayment": float(overpayment),
         "status": status,
+        "score": (scoring or {}).get("score"),
+        "decision_details": scoring or {},
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
-    st.session_state.applications.insert(0, application)
+    st.session_state.applications.insert(0, application_record)
     st.session_state.show_confirm = False
+
+    label = STATUS_LABELS.get(status, ("Получена", "🔵"))[0]
+    message = f"Заявка № {application_id} создана и прошла скоринг. Текущий статус: «{label}»."
+    explanation = (scoring or {}).get("explanation")
+    if explanation:
+        message += f" {explanation}"
+    message += " Решение демонстрационное и не является офертой банка."
+    st.session_state.messages.append({"role": "assistant", "content": message})
+    return True
+
+
+def confirm_application(application):
+    """Финальное подтверждение клиента: approved* -> issued (выдача смоделирована)."""
+    if not DEMO_MODE:
+        try:
+            result = api_confirm_application(application["id"])
+            updated = result.get("application") or {}
+            application["status"] = updated.get("status", "issued")
+        except requests.RequestException as exc:
+            logger.error("Не удалось подтвердить заявку на backend: %s", exc)
+            st.error(f"Не удалось подтвердить заявку: {exc}")
+            return False
+    else:
+        application["status"] = "issued"
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": f"Заявка № {application_id} создана в демонстрационном режиме. Текущий статус: «{STATUS_LABELS.get(status, ('Получена', '🔵'))[0]}». Это не является одобрением банка.",
+            "content": (
+                f"Заявка № {application['id']} подтверждена. Выдача финансирования "
+                "смоделирована: в демо-режиме деньги не переводятся."
+            ),
         }
     )
+    return True
+
+
+def rescore_application(application):
+    """Повторный скоринг после уточнения данных (needs_info -> решение)."""
+    product = next(
+        (
+            p
+            for p in (st.session_state.products or PRODUCTS)
+            if p.get("id") == application.get("product_id")
+        ),
+        None,
+    )
+    if product is None:
+        st.error("Продукт заявки не найден в каталоге.")
+        return False
+    if not DEMO_MODE:
+        try:
+            result = api_score_application(application["id"])
+            updated = result.get("application") or {}
+            scoring = result.get("scoring") or {}
+            application["status"] = updated.get("status", application["status"])
+            application["score"] = updated.get("score")
+            application["decision_details"] = scoring
+        except requests.RequestException as exc:
+            logger.error("Повторный скоринг не выполнен: %s", exc)
+            st.error(f"Повторный скоринг не выполнен: {exc}")
+            return False
+    else:
+        scoring = run_local_scoring(
+            product, application["amount"], application["term"], application["monthly_payment"]
+        )
+        application["status"] = scoring.get("decision", application["status"])
+        application["score"] = scoring.get("score")
+        application["decision_details"] = scoring
+    explanation = (application.get("decision_details") or {}).get(
+        "explanation", "Повторный скоринг выполнен."
+    )
+    st.session_state.messages.append({"role": "assistant", "content": explanation})
     return True
 
 
@@ -404,6 +616,8 @@ if not DEMO_MODE and not st.session_state.api_checked:
                 logger.info("Каталог продуктов получен с backend: %d позиций", len(products))
         except requests.RequestException as exc:
             logger.warning("Каталог продуктов не получен с backend, используется локальный: %s", exc)
+        # история диалогов живёт в БД backend — восстанавливаем после перезагрузки
+        restore_conversations()
 
 st.markdown(
     """
@@ -502,7 +716,11 @@ with st.sidebar:
     for conversation in st.session_state.conversations:
         label = "◉  " + conversation["title"]
         if st.button(label, key=f"conversation_{conversation['id']}", use_container_width=True):
-            st.session_state.active_conversation_id = conversation["id"]
+            if st.session_state.active_conversation_id != conversation["id"]:
+                st.session_state.active_conversation_id = conversation["id"]
+                # в live-режиме сообщения диалога подгружаются с backend
+                if not DEMO_MODE and st.session_state.api_available:
+                    load_conversation_messages(conversation["id"])
             st.rerun()
     # Заявки перенесены в expander «История заявок» правой панели (упрощение UI)
     if DEMO_MODE:
@@ -592,10 +810,14 @@ with chat_col:
                 time.sleep(0.8)
                 reply_text = "Спасибо, я принял описание. Расскажите о сумме, цели и сроке — я зафиксирую параметры в профиле. Затем нажмите «Подобрать продукты»."
             else:
+                # Профиль на backend создаётся при первом сообщении —
+                # тогда конвейер извлекает поля из каждого сообщения диалога
+                # и возвращает рекомендации, как только известны сумма и срок.
+                profile_id = ensure_backend_profile()
                 result = api_send_message(
                     st.session_state.active_conversation_id,
                     st.session_state.messages[-1]["content"],
-                    profile_id=st.session_state.backend_profile_id,
+                    profile_id=profile_id,
                 )
                 reply_text = result.get("reply", "Сообщение принято.")
                 updates = result.get("profile_updates") or {}
@@ -606,6 +828,16 @@ with chat_col:
                 if recommendations:
                     st.session_state.recommendations = recommendations
                     st.session_state.selected_product_id = recommendations[0]["id"]
+                    if not st.session_state.selection_unlocked:
+                        # панель выбора открывается автоматически, как только
+                        # данных профиля достаточно для подбора продуктов
+                        st.session_state.selection_unlocked = True
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "Данных достаточно — подобрал подходящие продукты. Выберите вариант в панели «Подобранные продукты» справа.",
+                            }
+                        )
             st.session_state.messages.append({"role": "assistant", "content": reply_text})
         except requests.RequestException as exc:
             st.session_state.messages.append(
@@ -680,6 +912,65 @@ with product_col:
                 if st.button("Отмена", use_container_width=True):
                     st.session_state.show_confirm = False
                     st.rerun()
+
+    # --- Мои заявки: путь от обращения до выдачи ---------------------------
+    if st.session_state.applications:
+        st.markdown('<div class="chip-label">Мои заявки</div>', unsafe_allow_html=True)
+        for application in st.session_state.applications:
+            status_key = application.get("status", "draft")
+            status_label, status_icon = STATUS_LABELS.get(status_key, ("Получена", "🔵"))
+            details = application.get("decision_details") or {}
+            score_line = (
+                f" · балл скоринга: {application['score']:g}"
+                if application.get("score") is not None
+                else ""
+            )
+            st.markdown(
+                f'<div class="application-row">'
+                f'<div class="application-name">{status_icon} {application.get("product_name", "Заявка")} · № {application.get("id")}</div>'
+                f'<div class="application-meta">'
+                f'{money(application.get("amount"))} на {application.get("term")} мес · '
+                f'платёж {money(application.get("monthly_payment"))}/мес<br>'
+                f'Статус: {status_label}{score_line}'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+            if details.get("explanation"):
+                st.caption(details["explanation"])
+            if status_key == "approved_with_changes" and details.get("suggested_amount"):
+                term_hint = (
+                    f" на {details['suggested_term_months']} мес"
+                    if details.get("suggested_term_months")
+                    else ""
+                )
+                st.info(
+                    f"Предложение банка: сумма {money(details['suggested_amount'])}{term_hint}, "
+                    f"платёж ≈ {money(details.get('suggested_monthly_payment'))}/мес."
+                )
+            if status_key in ("approved", "approved_with_changes"):
+                if st.button(
+                    "Подтвердить условия и получить финансирование",
+                    key=f"app_confirm_{application.get('id')}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    if confirm_application(application):
+                        st.success("Заявка подтверждена. Выдача смоделирована.")
+                        st.rerun()
+            elif status_key == "needs_info":
+                missing = ", ".join(details.get("missing_fields") or [])
+                st.warning(
+                    "Уточните данные о бизнесе в диалоге"
+                    + (f": {missing}" if missing else "")
+                    + " — затем отправьте заявку на повторный скоринг."
+                )
+                if st.button(
+                    "Отправить на повторный скоринг",
+                    key=f"app_rescore_{application.get('id')}",
+                    use_container_width=True,
+                ):
+                    if rescore_application(application):
+                        st.rerun()
 
 
    

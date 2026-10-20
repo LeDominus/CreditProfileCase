@@ -1,8 +1,8 @@
-"""Тесты движка рекомендаций (src/core/recommendations.py)."""
+﻿"""Тесты движка рекомендаций (src/core/recommendations.py)."""
 
 import pytest
 
-from src.core.credit_calc.calc_payment import calculate_annuity_payment
+from src.core.calc_payment import calculate_annuity_payment
 from src.core.recommendations import recommend_products
 
 BASE_PROFILE = {

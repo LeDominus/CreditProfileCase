@@ -1,34 +1,21 @@
-"""Инструменты LLM: оркестрация без самостоятельных вычислений.
-
-LLM не выполняет расчёты сама — при необходимости она возвращает
-структурированный вызов инструмента (JSON), код исполняет его
-детерминированно и возвращает результат LLM для финального ответа.
-"""
-
-import json
+﻿import json
 import logging
 import re
 from dataclasses import asdict
-
 from src.config.prompt import TOOL_USE_PROMPT
 from src.config.tools_config import (
     MAX_TOOL_CALLS,
     PAYMENT_TOOL_NAME,
     TOOL_RESULT_TEMPLATE,
 )
-from src.core.credit_calc.calc_payment import calculate_annuity_payment
+from src.core.calc_payment import calculate_annuity_payment
 from src.schemas.llm_schema import ToolExecution
 
 logger = logging.getLogger(__name__)
 
 
 def parse_tool_call(reply: str) -> dict | None:
-    """Разбор ответа LLM: возвращает вызов инструмента или None.
-
-    Вызовом считается ответ, состоящий только из JSON-объекта вида
-    {"tool": "...", "arguments": {...}} (допускается обрамление ```json ... ```).
-    Обычные текстовые ответы и JSON без ключа "tool" вызовом не считаются.
-    """
+    """Разбор ответа LLM: возвращает вызов инструмента или None"""
     if not reply:
         return None
     text = reply.strip()
@@ -55,11 +42,7 @@ def parse_tool_call(reply: str) -> dict | None:
 
 
 def execute_tool(tool_call: dict) -> ToolExecution:
-    """Детерминированное исполнение вызова инструмента.
-
-    Расчёт выполняет код (не LLM): LLM получает только результат.
-    Любая ошибка возвращается как ToolExecution(status="error", error=...).
-    """
+    """Детерминированное исполнение вызова инструмента"""
     tool = tool_call.get("tool")
     if tool != PAYMENT_TOOL_NAME:
         return ToolExecution(
@@ -118,17 +101,9 @@ def format_tool_result(result: ToolExecution) -> str:
     )
 
 
-def run_with_tools(llm, context: list[dict], max_tool_calls: int = MAX_TOOL_CALLS) -> str:
-    """Диалоговый цикл с инструментами: LLM оркестрирует, код считает.
-
-    1. К system-промпту добавляются правила использования инструментов.
-    2. Если ответ LLM — вызов инструмента, он исполняется кодом,
-       результат добавляется в контекст, и LLM формулирует финальный ответ.
-    3. Обычный текстовый ответ возвращается как есть (один запрос к LLM).
-    Лимит вызовов защищает от зацикливания: при его достижении результат
-    последнего расчёта форматируется кодом без участия LLM.
-    Исходный контекст не мутируется.
-    """
+def run_with_tools(llm, context: list[dict], max_tool_calls: int | None = None) -> str:
+    """Диалоговый цикл с инструментами: LLM оркестрирует, код считает"""
+    limit = MAX_TOOL_CALLS if max_tool_calls is None else max_tool_calls
     messages = [dict(message) for message in context]
     if messages and messages[0].get("role") == "system":
         messages[0] = {
@@ -143,11 +118,11 @@ def run_with_tools(llm, context: list[dict], max_tool_calls: int = MAX_TOOL_CALL
         tool_call = parse_tool_call(reply)
         if tool_call is None:
             return reply
-        if calls_made >= max_tool_calls:
+        if calls_made >= limit:
             logger.warning(
                 "Инструменты: достигнут лимит вызовов (%d) — "
                 "финальный ответ формируется без LLM",
-                max_tool_calls,
+                limit,
             )
             break
         calls_made += 1

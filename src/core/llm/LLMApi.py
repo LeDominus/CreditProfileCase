@@ -6,7 +6,8 @@ import warnings
 from openai import OpenAI
 from src.config.llm_config import (
     YANDEX_API_KEY, YANDEX_FOLDER, MODEL_NAME,
-    MAX_OUTPUT_TOKENS, TEMPERATURE, BASE_URL, MAX_MESSAGES
+    MAX_OUTPUT_TOKENS, TEMPERATURE, BASE_URL, MAX_MESSAGES,
+    REASONING_EFFORT,
 )
 from src.config.prompt import SYSTEM_PROMPT
 
@@ -87,9 +88,10 @@ class LLMApi:
         started = time.perf_counter()
         effective_temperature = TEMPERATURE if temperature is None else temperature
         effective_max_tokens = MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
+        effective_reasoning = (reasoning_effort if reasoning_effort is not None else REASONING_EFFORT)
         request_kwargs = {}
-        if reasoning_effort:
-            request_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+        if effective_reasoning and effective_reasoning != "off":
+            request_kwargs["extra_body"] = {"reasoning_effort": effective_reasoning}
         try:
             response = self.client.chat.completions.create(
                 model=self.model_uri,

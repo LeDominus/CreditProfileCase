@@ -15,6 +15,12 @@ def load_profile_repository(request: Request):
         return request.app.state.profile_rep
     except AttributeError:
         raise RuntimeError("ProfileRepository не инициализирован в app.state")
+
+def load_application_repository(request: Request):
+    try:
+        return request.app.state.app_rep
+    except AttributeError:
+        raise RuntimeError("ApplicationRepository не инициализирован в app.state")
     
 def load_LLM(request: Request):
     try:

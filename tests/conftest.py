@@ -6,10 +6,12 @@ os.environ.setdefault("YANDEX_FOLDER", "test-folder")
 import pytest
 
 from src.config.sql_queries import (
+    CREATE_APPLICATIONS_TABLE,
     CREATE_BUSINESS_PROFILES_TABLE,
     CREATE_CONVERSATIONS_TABLE,
     CREATE_MESSAGES_TABLE,
 )
+from src.core.applications import ApplicationRepository
 from src.core.conversations import ConversationRepository
 from src.core.llm.LLMApi import LLMApi
 from src.core.profile import ProfileRepository
@@ -24,12 +26,18 @@ def temp_db(tmp_path):
         conn.load_data(CREATE_CONVERSATIONS_TABLE)
         conn.load_data(CREATE_MESSAGES_TABLE)
         conn.load_data(CREATE_BUSINESS_PROFILES_TABLE)
+        conn.load_data(CREATE_APPLICATIONS_TABLE)
     return db
 
 
 @pytest.fixture()
 def profile_repo(temp_db):
     return ProfileRepository(dbConn=temp_db)
+
+
+@pytest.fixture()
+def app_repo(temp_db):
+    return ApplicationRepository(dbConn=temp_db)
 
 
 @pytest.fixture()

@@ -1,8 +1,8 @@
-"""Тесты аннуитетного калькулятора (src/core/credit_calc/calc_payment.py)."""
+﻿"""Тесты аннуитетного калькулятора (src/core/calc_payment.py)."""
 
 import pytest
 
-from src.core.credit_calc.calc_payment import calculate_annuity_payment
+from src.core.calc_payment import calculate_annuity_payment
 
 
 class TestCalculateAnnuityPayment:

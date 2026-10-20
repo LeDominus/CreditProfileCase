@@ -9,7 +9,7 @@ class BusinessProfile:
     industry: str
     funding_purpose: str
     requested_amount: float | None
-    business_age_months: int
+    business_age_months: int | None
     monthly_revenue: float | None
     monthly_profit: float | None
     preferred_term_months: int
@@ -34,14 +34,19 @@ class ProfileRequest(BaseModel):
 
 
 class ProfileCreateRequest(BaseModel):
-    """Модель создания профиля: ключевые бизнес-поля обязательны, остальные опциональны."""
+    """Модель создания профиля: ключевые бизнес-поля обязательны, остальные опциональны.
+
+    business_age_months опционален: профиль создаётся при первом сообщении
+    диалога, когда стаж бизнеса ещё не назван (в БД колонка nullable,
+    скоринг до уточнения вернёт needs_info).
+    """
     model_config = ConfigDict(extra="forbid")
 
     business_name: str | None = None
     industry: str
     funding_purpose: str
     requested_amount: float | None = None
-    business_age_months: int
+    business_age_months: int | None = None
     monthly_revenue: float | None = None
     monthly_profit: float | None = None
     preferred_term_months: int

@@ -107,9 +107,16 @@ class TestLLMRequestLogging:
         call = llm.client.chat.completions.calls[0]
         assert call["extra_body"] == {"reasoning_effort": "none"}
 
-    def test_complete_without_reasoning_effort_sends_no_extra_body(self):
-        """Без reasoning_effort extra_body не передаётся."""
+    def test_complete_without_reasoning_effort_uses_config_default(self):
+        """Без явного reasoning_effort используется значение из конфига."""
         llm = _make_llm(answer="Ответ")
-        llm.complete([{"role": "user", "content": "Привит"}])
+        llm.complete([{"role": "user", "content": "Привет"}])
+        call = llm.client.chat.completions.calls[0]
+        assert call["extra_body"] == {"reasoning_effort": "low"}
+
+    def test_complete_reasoning_effort_off_sends_no_extra_body(self):
+        """reasoning_effort='off' — параметр не отправляется провайдеру."""
+        llm = _make_llm(answer="Ответ")
+        llm.complete([{"role": "user", "content": "Привет"}], reasoning_effort="off")
         call = llm.client.chat.completions.calls[0]
         assert "extra_body" not in call

@@ -5,6 +5,7 @@ from src.config.sql_queries import (
     CREATE_CONVERSATION_QUERY,
     GET_CONVERSATION_QUERY,
     GET_MESSAGES_QUERY,
+    LIST_CONVERSATIONS_QUERY,
     SEND_MESSAGE_CONVERSATION_QUERY,
 )
 
@@ -39,6 +40,20 @@ class ConversationRepository:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             id=row["id"],
         )
+
+    def get_conversations(self) -> list[Conversation]:
+        """Все диалоги, свежие сверху (для восстановления истории в UI)."""
+        with self.dbConn as conn:
+            rows = conn.read_data(sqlQuery=LIST_CONVERSATIONS_QUERY)
+        return [
+            Conversation(
+                state=row["state"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
     
     def send_conversation_message(self, message: Message) -> int:
         """Запись сообщения в БД. Возвращает id, сгенерированный БД"""

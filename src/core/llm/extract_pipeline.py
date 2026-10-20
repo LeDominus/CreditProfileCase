@@ -1,7 +1,6 @@
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import HTTPException, status
 from src.schemas.llm_schema import ContractExtraction
 from src.core.llm.utils import extract_profile_fields
 from src.core.recommendations import recommend_products
@@ -11,7 +10,7 @@ from src.core.profile import ProfileRepository
 from src.schemas.conversation_schema import ConversationCreateMessage, Message
 from src.schemas.profile_schema import BusinessProfile
 from src.core.conversations import ConversationRepository
-from src.utils import FALLBACK_REPLY, profile_to_dict
+from src.utils import FALLBACK_REPLY, get_profile_or_404, profile_to_dict
 
 
 def extract_content(
@@ -27,12 +26,7 @@ def extract_content(
     profile: BusinessProfile | None = None
     profile_updates: dict = {}
     if payload.profile_id is not None:
-        profile = profile_rep.get_profile(payload.profile_id)
-        if profile is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Profile with id={payload.profile_id} not found"
-            )
+        profile = get_profile_or_404(profile_rep, payload.profile_id)
         profile_updates = extract_profile_fields(
             payload.content, llm, profile_to_dict(profile)
         )
