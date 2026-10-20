@@ -19,6 +19,7 @@ class ConversationRepository:
             return conn.load_data(
                 sqlQuery=CREATE_CONVERSATION_QUERY,
                 parameters={
+                    "user_id": conversation.user_id,
                     "state": conversation.state,
                     "created_at": str(conversation.created_at.isoformat()),
                     "updated_at": str(conversation.updated_at.isoformat())
@@ -36,18 +37,23 @@ class ConversationRepository:
         row = rows[0]
         return Conversation(
             state=row["state"],
+            user_id=row["user_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             id=row["id"],
         )
 
-    def get_conversations(self) -> list[Conversation]:
-        """Все диалоги, свежие сверху (для восстановления истории в UI)."""
+    def get_conversations(self, user_id: int) -> list[Conversation]:
+        """Диалоги пользователя, свежие сверху (для восстановления истории в UI)."""
         with self.dbConn as conn:
-            rows = conn.read_data(sqlQuery=LIST_CONVERSATIONS_QUERY)
+            rows = conn.read_data(
+                sqlQuery=LIST_CONVERSATIONS_QUERY,
+                parameters={"user_id": user_id},
+            )
         return [
             Conversation(
                 state=row["state"],
+                user_id=row["user_id"],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
                 id=row["id"],

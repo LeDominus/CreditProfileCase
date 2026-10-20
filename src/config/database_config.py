@@ -5,3 +5,7 @@ ALLOWED_TABLES = {
     "messages",
     "applications",
 }
+
+ALLOWED_ROLES = ("client", "bank_manager", "bank_analyst")
+
+PBKDF2_ITERATIONS = 100_000

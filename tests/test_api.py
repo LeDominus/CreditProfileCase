@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import ChatStubLLM
+from tests.conftest import ChatStubLLM, authorize_client
 
 
 @pytest.fixture()
@@ -14,6 +14,8 @@ def client(tmp_path, monkeypatch):
     with TestClient(app) as test_client:
         # подменяем LLM на стаб: конвейер сообщений не должен ходить в сеть
         test_client.app.state.llmAPI = ChatStubLLM()
+        # диалоги и профили привязаны к пользователю: все ручки требуют токен
+        authorize_client(test_client)
         yield test_client
 
 
@@ -70,6 +72,89 @@ class TestConversationsHistory:
 
     def test_get_messages_of_missing_conversation_404(self, client):
         assert client.get("/api/conversations/999/messages").status_code == 404
+
+
+class TestUserIsolation:
+    """Диалоги и профили привязаны к user_id: чужое недоступно, своё — доступно."""
+
+    def _register_other_user(self, client, username: str) -> str:
+        """Токен второго пользователя (запрос с его токеном переопределяет дефолтный)."""
+        response = client.post(
+            "/api/auth/register",
+            json={"username": username, "password": "secret123"},
+        )
+        return response.json()["token"]
+
+    def _as_other(self, token: str) -> dict:
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_conversations_require_valid_token(self, client):
+        response = client.post(
+            "/api/conversations", json={}, headers={"Authorization": "Bearer bad"}
+        )
+        assert response.status_code == 401
+
+    def test_list_shows_only_own_conversations(self, client):
+        other_token = self._register_other_user(client, "other_user")
+        client.post("/api/conversations", json={}, headers=self._as_other(other_token))
+        mine = client.post("/api/conversations", json={}).json()["id"]
+
+        body = client.get("/api/conversations").json()
+        assert [c["id"] for c in body["conversations"]] == [mine]
+
+    def test_other_users_conversation_404(self, client):
+        other_token = self._register_other_user(client, "other_user")
+        other_conv = client.post(
+            "/api/conversations", json={}, headers=self._as_other(other_token)
+        ).json()["id"]
+
+        assert (
+            client.get(f"/api/conversations/{other_conv}/messages").status_code == 404
+        )
+        assert (
+            client.post(
+                f"/api/conversations/{other_conv}/messages",
+                json={"role": "user", "content": "hi"},
+            ).status_code
+            == 404
+        )
+
+    def test_other_users_profile_404(self, client):
+        other_token = self._register_other_user(client, "other_user")
+        other_profile = client.post(
+            "/api/profile",
+            json={
+                "industry": "IT",
+                "funding_purpose": "Развитие",
+                "preferred_term_months": 24,
+            },
+            headers=self._as_other(other_token),
+        ).json()["id"]
+
+        assert client.get(f"/api/profile/{other_profile}").status_code == 404
+        assert (
+            client.patch(
+                f"/api/profile/{other_profile}", json={"industry": "IT"}
+            ).status_code
+            == 404
+        )
+
+    def test_created_objects_bound_to_user(self, client):
+        """Созданные через API объекты несут user_id автора."""
+        me = client.get("/api/auth/me").json()["user"]
+        conv_id = client.post("/api/conversations", json={}).json()["id"]
+        profile = client.post(
+            "/api/profile",
+            json={
+                "industry": "IT",
+                "funding_purpose": "Развитие",
+                "preferred_term_months": 24,
+            },
+        ).json()
+
+        assert profile["user_id"] == me["id"]
+        messages = client.get(f"/api/conversations/{conv_id}/messages").json()
+        assert messages["status"] == "success"
 
     def test_get_messages_returns_dialog_history(self, client):
         conversation_id = client.post("/api/conversations", json={}).json()["id"]

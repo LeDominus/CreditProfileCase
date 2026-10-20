@@ -18,6 +18,7 @@ class ProfileRepository:
             return conn.load_data(
                 sqlQuery=CREATE_PROFILE_QUERY,
                 parameters={
+                    "user_id": profile.user_id,
                     "business_name": profile.business_name,
                     "industry": profile.industry,
                     "funding_purpose": profile.funding_purpose,
@@ -43,6 +44,7 @@ class ProfileRepository:
             return None
         row = rows[0]
         return BusinessProfile(
+            user_id=row["user_id"],
             business_name=row["business_name"],
             industry=row["industry"],
             funding_purpose=row["funding_purpose"],

@@ -7,11 +7,14 @@ import pytest
 
 from src.config.sql_queries import (
     CREATE_APPLICATIONS_TABLE,
+    CREATE_AUTH_TOKENS_TABLE,
     CREATE_BUSINESS_PROFILES_TABLE,
     CREATE_CONVERSATIONS_TABLE,
     CREATE_MESSAGES_TABLE,
+    CREATE_USERS_TABLE,
 )
 from src.core.applications import ApplicationRepository
+from src.core.auth.auth import AuthRepository
 from src.core.conversations import ConversationRepository
 from src.core.llm.LLMApi import LLMApi
 from src.core.profile import ProfileRepository
@@ -27,6 +30,8 @@ def temp_db(tmp_path):
         conn.load_data(CREATE_MESSAGES_TABLE)
         conn.load_data(CREATE_BUSINESS_PROFILES_TABLE)
         conn.load_data(CREATE_APPLICATIONS_TABLE)
+        conn.load_data(CREATE_USERS_TABLE)
+        conn.load_data(CREATE_AUTH_TOKENS_TABLE)
     return db
 
 
@@ -41,8 +46,26 @@ def app_repo(temp_db):
 
 
 @pytest.fixture()
+def auth_repo(temp_db):
+    return AuthRepository(dbConn=temp_db)
+
+
+@pytest.fixture()
 def conv_repo(temp_db):
     return ConversationRepository(dbConn=temp_db)
+
+
+def authorize_client(client, username: str = "tester") -> None:
+    """Регистрирует пользователя и ставит его токен в заголовки клиента по умолчанию.
+
+    Диалоги и профили привязаны к user_id, поэтому всем клиентским фикстурам
+    нужен действительный Bearer-токен.
+    """
+    token = client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "secret123"},
+    ).json()["token"]
+    client.headers.update({"Authorization": f"Bearer {token}"})
 
 
 class StubLLM(LLMApi):

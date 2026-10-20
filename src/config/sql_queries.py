@@ -1,6 +1,6 @@
 CREATE_CONVERSATION_QUERY = """
-    INSERT INTO conversations (state, created_at, updated_at)
-    VALUES (:state, :created_at, :updated_at)
+    INSERT INTO conversations (user_id, state, created_at, updated_at)
+    VALUES (:user_id, :state, :created_at, :updated_at)
 """
 
 SEND_MESSAGE_CONVERSATION_QUERY = """
@@ -9,32 +9,33 @@ SEND_MESSAGE_CONVERSATION_QUERY = """
 """
 
 GET_CONVERSATION_QUERY = """
-    SELECT id, state, created_at, updated_at
+    SELECT id, user_id, state, created_at, updated_at
     FROM conversations
     WHERE id = :id
 """
 
 LIST_CONVERSATIONS_QUERY = """
-    SELECT id, state, created_at, updated_at
+    SELECT id, user_id, state, created_at, updated_at
     FROM conversations
+    WHERE user_id = :user_id
     ORDER BY updated_at DESC, id DESC
 """
 
 CREATE_PROFILE_QUERY = """
     INSERT INTO business_profiles (
-        business_name, industry, funding_purpose, requested_amount,
+        user_id, business_name, industry, funding_purpose, requested_amount,
         business_age_months, monthly_revenue, monthly_profit,
         preferred_term_months, max_monthly_payment, created_at, updated_at
     )
     VALUES (
-        :business_name, :industry, :funding_purpose, :requested_amount,
+        :user_id, :business_name, :industry, :funding_purpose, :requested_amount,
         :business_age_months, :monthly_revenue, :monthly_profit,
         :preferred_term_months, :max_monthly_payment, :created_at, :updated_at
     )
 """
 
 GET_PROFILE_QUERY = """
-    SELECT id, business_name, industry, funding_purpose, requested_amount,
+    SELECT id, user_id, business_name, industry, funding_purpose, requested_amount,
            business_age_months, monthly_revenue, monthly_profit,
            preferred_term_months, max_monthly_payment, created_at, updated_at
     FROM business_profiles
@@ -66,6 +67,7 @@ GET_MESSAGES_QUERY = """
 CREATE_CONVERSATIONS_TABLE = """
     CREATE TABLE IF NOT EXISTS conversations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
         state TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -85,6 +87,7 @@ CREATE_MESSAGES_TABLE = """
 CREATE_BUSINESS_PROFILES_TABLE = """
     CREATE TABLE IF NOT EXISTS business_profiles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
         business_name TEXT,
         industry TEXT NOT NULL,
         funding_purpose TEXT NOT NULL,
@@ -156,4 +159,52 @@ CREATE_APPLICATIONS_TABLE = """
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
+"""
+
+CREATE_USERS_TABLE = """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'client',
+        created_at TEXT NOT NULL
+    )
+"""
+
+CREATE_AUTH_TOKENS_TABLE = """
+    CREATE TABLE IF NOT EXISTS auth_tokens (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )
+"""
+
+CREATE_USER_QUERY = """
+    INSERT INTO users (username, password_hash, salt, role, created_at)
+    VALUES (:username, :password_hash, :salt, :role, :created_at)
+"""
+
+GET_USER_BY_USERNAME_QUERY = """
+    SELECT id, username, password_hash, salt, role, created_at
+    FROM users
+    WHERE username = :username
+"""
+
+GET_USER_BY_ID_QUERY = """
+    SELECT id, username, role, created_at
+    FROM users
+    WHERE id = :id
+"""
+
+CREATE_AUTH_TOKEN_QUERY = """
+    INSERT INTO auth_tokens (token, user_id, created_at)
+    VALUES (:token, :user_id, :created_at)
+"""
+
+GET_USER_BY_TOKEN_QUERY = """
+    SELECT u.id, u.username, u.role, u.created_at
+    FROM auth_tokens t
+    JOIN users u ON u.id = t.user_id
+    WHERE t.token = :token
 """

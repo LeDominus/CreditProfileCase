@@ -14,6 +14,7 @@ class BusinessProfile:
     monthly_profit: float | None
     preferred_term_months: int
     max_monthly_payment: float | None
+    user_id: int | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     id: int | None = None

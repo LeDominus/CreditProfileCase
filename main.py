@@ -3,11 +3,23 @@ import uvicorn
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Header, status
 from src.core.llm.extract_pipeline import extract_content
 from src.config.products import PRODUCTS
 from src.core.llm.LLMApi import LLMApi
 from src.core.applications import ApplicationRepository
+from src.core.auth.auth import (
+    AuthRepository,
+    InvalidCredentialsError,
+    InvalidRoleError,
+    UsernameTakenError,
+)
+from src.core.auth.auth_service_methods import (
+    login_user,
+    register_user,
+    user_response
+)
+from src.core.auth.dependencies import get_current_user
 from src.core.profile import ProfileRepository
 from src.core.recommendations import recommend_products
 from src.core.scoring_service import (
@@ -22,11 +34,13 @@ from src.core.calc_payment import calculate_annuity_payment
 from src.DI import (
     load_LLM,
     load_application_repository,
+    load_auth_repository,
     load_conversation_repository,
     load_profile_repository,
 )
 from src.core.conversations import ConversationRepository
 from src.database.database import DatabaseConnector
+from src.database.migrations import apply_migrations
 from src.schemas.llm_schema import ContractExtraction
 from src.schemas.application_schema import (
     STATUS_APPROVED,
@@ -37,6 +51,7 @@ from src.schemas.application_schema import (
     ApplicationConfirmRequest,
     ApplicationCreateRequest,
 )
+from src.schemas.auth_schema import AuthLoginRequest, AuthRegisterRequest, User
 from src.schemas.conversation_schema import (
     Conversation,
     ConversationCreateMessage,
@@ -51,14 +66,18 @@ from src.schemas.profile_schema import (
 )
 from src.config.sql_queries import (
     CREATE_APPLICATIONS_TABLE,
+    CREATE_AUTH_TOKENS_TABLE,
     CREATE_BUSINESS_PROFILES_TABLE,
     CREATE_CONVERSATIONS_TABLE,
     CREATE_MESSAGES_TABLE,
+    CREATE_USERS_TABLE,
 )
 from src.utils import (
     profile_to_dict, get_product,
     application_response,
     get_application_or_404,
+    get_owned_conversation_or_404,
+    get_owned_profile_or_404,
     get_profile_or_404,
 )
 
@@ -81,6 +100,10 @@ async def lifespan(app):
             conn.load_data(CREATE_MESSAGES_TABLE)
             conn.load_data(CREATE_BUSINESS_PROFILES_TABLE)
             conn.load_data(CREATE_APPLICATIONS_TABLE)
+            conn.load_data(CREATE_USERS_TABLE)
+            conn.load_data(CREATE_AUTH_TOKENS_TABLE)
+            # новые колонки в уже существующих таблицах (идемпотентно)
+            apply_migrations(conn)
     except Exception as e:
         raise RuntimeError(f"[app] Ошибка при создании таблиц: {e}") from e
 
@@ -98,7 +121,12 @@ async def lifespan(app):
         app.state.app_rep = ApplicationRepository(dbConn=app.state.dbConn)
     except Exception as e:
         raise RuntimeError(f"[app] Ошибка при инициализации ApplicationRepository: {e}") from e
-    
+
+    try:
+        app.state.auth_rep = AuthRepository(dbConn=app.state.dbConn)
+    except Exception as e:
+        raise RuntimeError(f"[app] Ошибка при инициализации AuthRepository: {e}") from e
+
     try:
         app.state.llmAPI = LLMApi()
     except Exception as e:
@@ -113,13 +141,52 @@ app = FastAPI(lifespan=lifespan)
 def health_check():
     return {"status": "ok"}
 
+
+@app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
+def auth_register(
+    payload: AuthRegisterRequest,
+    auth_rep: AuthRepository = Depends(load_auth_repository),
+) -> dict:
+    """Регистрация пользователя: создаёт аккаунт и сразу выдаёт токен сессии."""
+    try:
+        user, token = register_user(auth_rep, payload.username, payload.password, payload.role)
+    except UsernameTakenError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except InvalidRoleError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to register user: {str(e)}")
+    return {"status": "success", "token": token, "user": user_response(user)}
+
+
+@app.post("/api/auth/login")
+def auth_login(
+    payload: AuthLoginRequest,
+    auth_rep: AuthRepository = Depends(load_auth_repository),
+) -> dict:
+    """Вход по логину и паролю: выдаёт токен сессии."""
+    try:
+        user, token = login_user(auth_rep, payload.username, payload.password)
+    except InvalidCredentialsError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to login: {str(e)}")
+    return {"status": "success", "token": token, "user": user_response(user)}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: User = Depends(get_current_user)) -> dict:
+    """Текущий пользователь по заголовку Authorization: Bearer <token>."""
+    return {"status": "success", "user": user_response(user)}
+
 @app.post("/api/conversations", status_code=status.HTTP_201_CREATED)
 def create_conversation(
     payload: ConversationCreateRequest,
+    user: User = Depends(get_current_user),
     conv_rep: ConversationRepository = Depends(load_conversation_repository)
 ) -> dict:
     try:
-        new_conversation = Conversation(state=payload.state)
+        new_conversation = Conversation(state=payload.state, user_id=user.id)
         conversation_id = conv_rep.create_conversation(new_conversation)
         return {"status": "success", "id": conversation_id}
     except Exception as e:
@@ -129,17 +196,16 @@ def create_conversation(
 def create_conversation_message(
     conversation_id: int,
     payload: ConversationCreateMessage,
+    user: User = Depends(get_current_user),
     conv_rep: ConversationRepository = Depends(load_conversation_repository),
     profile_rep: ProfileRepository = Depends(load_profile_repository),
     llm: LLMApi = Depends(load_LLM),
 ) -> ContractExtraction:
     """LLM-конвейер обработки сообщения"""
     try:
-        if conv_rep.get_conversation(conversation_id) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Conversation with id={conversation_id} not found"
-            )
+        get_owned_conversation_or_404(conv_rep, conversation_id, user.id)
+        if payload.profile_id is not None:
+            get_owned_profile_or_404(profile_rep, payload.profile_id, user.id)
 
         new_message = Message(
             conversation_id=conversation_id,
@@ -163,11 +229,12 @@ def create_conversation_message(
     
 @app.get("/api/conversations")
 def list_conversations(
+    user: User = Depends(get_current_user),
     conv_rep: ConversationRepository = Depends(load_conversation_repository),
 ) -> dict:
-    """Список диалогов, свежие сверху (для восстановления истории в UI)."""
+    """Список диалогов пользователя, свежие сверху (для восстановления истории в UI)."""
     try:
-        conversations = conv_rep.get_conversations()
+        conversations = conv_rep.get_conversations(user_id=user.id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list conversations: {str(e)}")
     return {
@@ -186,15 +253,12 @@ def list_conversations(
 @app.get("/api/conversations/{conversation_id}/messages")
 def get_conversation_messages(
     conversation_id: int,
+    user: User = Depends(get_current_user),
     conv_rep: ConversationRepository = Depends(load_conversation_repository),
 ) -> dict:
     """Все сообщения диалога в хронологическом порядке."""
     try:
-        if conv_rep.get_conversation(conversation_id) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Conversation with id={conversation_id} not found"
-            )
+        get_owned_conversation_or_404(conv_rep, conversation_id, user.id)
         messages = conv_rep.get_conversation_messages(conversation_id)
     except HTTPException:
         raise
@@ -217,10 +281,12 @@ def load_catalog(payload: RecommendationRequest) -> dict:
 @app.post("/api/profile", status_code=status.HTTP_201_CREATED, response_model=BusinessProfile)
 def create_profile(
     payload: ProfileCreateRequest,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository)
 ) -> BusinessProfile:
     try:
         new_profile = BusinessProfile(
+            user_id=user.id,
             business_name=payload.business_name,
             industry=payload.industry,
             funding_purpose=payload.funding_purpose,
@@ -240,9 +306,10 @@ def create_profile(
 def update_profile(
     profile_id: int,
     payload: ProfileRequest,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository)
 ) -> BusinessProfile:
-    current = get_profile_or_404(profile_rep, profile_id)
+    current = get_owned_profile_or_404(profile_rep, profile_id, user.id)
     try:
         changes = payload.model_dump(exclude_unset=True)
         if not changes:
@@ -265,17 +332,19 @@ def update_profile(
 @app.get("/api/profile/{profile_id}", response_model=BusinessProfile)
 def get_profile(
     profile_id: int,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository)
 ) -> BusinessProfile:
-    return get_profile_or_404(profile_rep, profile_id)
+    return get_owned_profile_or_404(profile_rep, profile_id, user.id)
 
 @app.post("/api/profile/{profile_id}/payment")
 def calc_payment_for_profile(
     profile_id: int,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository)
 ) -> dict:
     """Расчёт аннуитетного платежа по профилю + подбор продукта"""
-    profile = get_profile_or_404(profile_rep, profile_id)
+    profile = get_owned_profile_or_404(profile_rep, profile_id, user.id)
 
     profile_dict = profile_to_dict(profile)
     if (

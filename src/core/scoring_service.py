@@ -1,11 +1,4 @@
-"""Сервис скоринга заявки: банковская логика конвейера без HTTP-слоя.
-
-Эндпоинт в main.py только вызывает process_application_scoring и маппит
-доменные исключения в HTTP-коды.
-"""
-
 from datetime import datetime, timezone
-
 from src.core.applications import ApplicationRepository
 from src.core.profile import ProfileRepository
 from src.core.scoring import score_application
@@ -17,44 +10,15 @@ from src.schemas.application_schema import (
     can_transition,
 )
 from src.utils import get_product, profile_to_dict
-
-
-class ScoringError(Exception):
-    """Базовая ошибка конвейера скоринга заявки."""
-
-
-class ApplicationNotFoundError(ScoringError):
-    """Заявка не найдена."""
-
-
-class InvalidApplicationStatusError(ScoringError):
-    """Недопустимый статус заявки или переход статусов."""
-
-
-class ProfileNotFoundError(ScoringError):
-    """Профиль, на который ссылается заявка, не найден."""
-
-
-class ProductNotFoundError(ScoringError):
-    """Продукт, на который ссылается заявка, не найден."""
-
-
-class ScoringRepositoryError(ScoringError):
-    """Сбой доступа к БД при скоринге заявки."""
-
+from src.exceptions import *
 
 def process_application_scoring(
     application_id: int,
     app_rep: ApplicationRepository,
     profile_rep: ProfileRepository,
 ) -> tuple[Application, dict]:
-    """Скоринг заявки: submitted/needs_info -> scoring -> решение.
-
-    Проверяет допустимость скоринга по статусу, считает балл, проводит заявку
-    через статусную модель (с проверкой переходов) и фиксирует результат
-    в БД. Возвращает кортеж (заявка из БД после обновления, результат
-    скоринга в виде словаря).
-    """
+    """Скоринг заявки: submitted/needs_info -> scoring -> решение"""
+    
     application = _get_application(app_rep, application_id)
     if application.status not in (STATUS_SUBMITTED, STATUS_NEEDS_INFO):
         raise InvalidApplicationStatusError(
@@ -95,9 +59,7 @@ def process_application_scoring(
     return stored, result.to_dict()
 
 
-def _get_application(
-    app_rep: ApplicationRepository, application_id: int
-) -> Application:
+def _get_application(app_rep: ApplicationRepository, application_id: int) -> Application:
     try:
         application = app_rep.get_application(application_id)
     except Exception as e:

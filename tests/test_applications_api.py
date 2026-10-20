@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import ChatStubLLM
+from tests.conftest import ChatStubLLM, authorize_client
 
 
 @pytest.fixture()
@@ -13,6 +13,7 @@ def client(tmp_path, monkeypatch):
 
     with TestClient(app) as test_client:
         test_client.app.state.llmAPI = ChatStubLLM()
+        authorize_client(test_client)
         yield test_client
 
 

@@ -19,7 +19,7 @@ from src.core.llm.tools import (
     run_with_tools,
 )
 from src.schemas.llm_schema import ToolExecution
-from tests.conftest import ChatStubLLM
+from tests.conftest import ChatStubLLM, authorize_client
 
 
 class SequenceStubLLM:
@@ -221,6 +221,7 @@ class TestMessageEndpointWithTools:
         from main import app
 
         with TestClient(app) as test_client:
+            authorize_client(test_client)
             yield test_client
 
     def test_reply_comes_from_tool_flow(self, client):

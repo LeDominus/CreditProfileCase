@@ -165,11 +165,16 @@ def api_request(method, path, timeout=8, **kwargs):
     """
     started = time.perf_counter()
     logger.info("→ %s %s — отправка запроса…", method, path)
+    # токен авторизации добавляется ко всем запросам (если пользователь вошёл)
+    headers = dict(kwargs.pop("headers", None) or {})
+    if st.session_state.get("auth_token"):
+        headers.setdefault("Authorization", f"Bearer {st.session_state.auth_token}")
     try:
         response = requests.request(
             method,
             f"{API_BASE_URL}{path}",
             timeout=timeout,
+            headers=headers,
             **kwargs,
         )
         response.raise_for_status()
@@ -201,6 +206,100 @@ def api_request(method, path, timeout=8, **kwargs):
 def api_health() -> dict:
     """GET /health — проверка доступности backend."""
     return api_request("GET", "/health")
+
+
+def api_register(username: str, password: str, role: str = "client") -> dict:
+    """POST /api/auth/register — регистрация пользователя."""
+    return api_request("POST", "/api/auth/register", json={"username": username, "password": password, "role": role})
+
+
+def api_login(username: str, password: str) -> dict:
+    """POST /api/auth/login — вход (получение токена сессии)."""
+    return api_request("POST", "/api/auth/login", json={"username": username, "password": password})
+
+
+def api_me() -> dict:
+    """GET /api/auth/me — текущий пользователь по токену."""
+    return api_request("GET", "/api/auth/me")
+
+
+ROLE_LABELS = {
+    "client": "Предприниматель (клиент)",
+    "bank_manager": "Кредитный менеджер банка",
+    "bank_analyst": "Кредитный аналитик (андеррайтер)",
+}
+
+
+def render_login_page():
+    """Страница авторизации: вкладки «Вход» и «Регистрация».
+
+    Живой режим требует входа до основного интерфейса; в демо-режиме
+    авторизация не нужна (синтетические данные без backend).
+    """
+    st.markdown(
+        """
+        <div class="login-hero">
+            <div class="login-icon">◈</div>
+            <div class="page-title">ФинПомощник · кредиты для бизнеса</div>
+            <div class="login-sub">Войдите, чтобы продолжить диалог о финансировании</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    login_tab, register_tab = st.tabs(["Вход", "Регистрация"])
+
+    with login_tab:
+        username = st.text_input("Логин", key="login_username")
+        password = st.text_input("Пароль", type="password", key="login_password")
+        if st.button("Войти", type="primary", use_container_width=True, key="login_submit"):
+            if not username or not password:
+                st.warning("Введите логин и пароль.")
+            else:
+                try:
+                    result = api_login(username.strip(), password)
+                except requests.HTTPError as exc:
+                    if exc.response is not None and exc.response.status_code == 401:
+                        st.error("Неверный логин или пароль.")
+                    else:
+                        st.error(f"Ошибка входа ({exc}).")
+                except requests.RequestException as exc:
+                    st.error(f"Backend недоступен: {exc}")
+                else:
+                    st.session_state.auth_token = result.get("token")
+                    st.session_state.auth_user = result.get("user")
+                    st.rerun()
+
+    with register_tab:
+        username = st.text_input("Логин (минимум 3 символа)", key="register_username")
+        password = st.text_input("Пароль (минимум 4 символа)", type="password", key="register_password")
+        password_repeat = st.text_input("Повторите пароль", type="password", key="register_password_repeat")
+        role = st.selectbox(
+            "Роль",
+            options=list(ROLE_LABELS.keys()),
+            format_func=lambda value: ROLE_LABELS[value],
+            key="register_role",
+        )
+        if st.button("Создать аккаунт", type="primary", use_container_width=True, key="register_submit"):
+            if not username or not password:
+                st.warning("Заполните логин и пароль.")
+            elif password != password_repeat:
+                st.warning("Пароли не совпадают.")
+            else:
+                try:
+                    result = api_register(username.strip(), password, role)
+                except requests.HTTPError as exc:
+                    if exc.response is not None and exc.response.status_code == 409:
+                        st.error("Этот логин уже занят.")
+                    elif exc.response is not None and exc.response.status_code == 422:
+                        st.error("Проверьте длину логина (от 3 символов) и пароля (от 4 символов).")
+                    else:
+                        st.error(f"Ошибка регистрации ({exc}).")
+                except requests.RequestException as exc:
+                    st.error(f"Backend недоступен: {exc}")
+                else:
+                    st.session_state.auth_token = result.get("token")
+                    st.session_state.auth_user = result.get("user")
+                    st.rerun()
 
 
 def api_create_conversation(state: str = "new") -> dict:
@@ -323,6 +422,8 @@ def init_state():
         "products": None,
         "awaiting_reply": False,
         "selection_unlocked": False,
+        "auth_token": None,
+        "auth_user": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -598,6 +699,12 @@ def rescore_application(application):
 
 init_state()
 
+# Живой режим: страница авторизации до основного интерфейса
+# (демо-режим работает без авторизации — синтетические данные без backend)
+if not DEMO_MODE and st.session_state.auth_token is None:
+    render_login_page()
+    st.stop()
+
 # Живой режим: при первом запуске проверяем backend и подтягиваем каталог продуктов
 if not DEMO_MODE and not st.session_state.api_checked:
     st.session_state.api_checked = True
@@ -692,6 +799,9 @@ st.markdown(
     .product-row-badge { margin-left:auto; font-size:9px; font-weight:800; letter-spacing:.6px; color:#9cc0ff; background:#1d2f55; padding:4px 8px; border-radius:6px; white-space:nowrap; }
     div[data-testid="stExpander"] { border:1px solid var(--line); border-radius:12px; }
     @media (max-width: 900px) { .page-title {font-size:23px;} .hero {padding:18px;} .product-card {padding:13px;} }
+    .login-hero { max-width:520px; margin:9vh auto 26px; text-align:center; }
+    .login-icon { width:64px; height:64px; margin:0 auto 18px; border-radius:20px; display:flex; align-items:center; justify-content:center; color:#fff; background:linear-gradient(145deg,#3568ed,#2147b6); font-size:34px; font-weight:800; box-shadow:0 10px 30px #0008; }
+    .login-sub { color:var(--muted); font-size:13.5px; margin-top:8px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -726,6 +836,21 @@ with st.sidebar:
     if DEMO_MODE:
         st.caption("● Демо-режим · синтетические данные")
     else:
+        # карточка текущего пользователя + выход (живой режим с авторизацией)
+        if st.session_state.auth_user:
+            role_label = ROLE_LABELS.get(
+                st.session_state.auth_user.get("role"), st.session_state.auth_user.get("role")
+            )
+            st.markdown('<div class="section-kicker">Аккаунт</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="font-size:12px;color:#e8edf8;padding:4px 2px;">👤 {st.session_state.auth_user.get("username")}</div>'
+                f'<div style="font-size:10.5px;color:#93a0b8;padding:2px 2px 10px;">{role_label}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⏻  Выйти", use_container_width=True):
+                st.session_state.auth_token = None
+                st.session_state.auth_user = None
+                st.rerun()
         backend_state = "онлайн" if st.session_state.api_available else "недоступен"
         st.caption(f"API: {API_BASE_URL} · {backend_state}")
 
