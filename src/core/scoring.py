@@ -22,10 +22,7 @@ from src.config.scoring_config import (
     CLAMP_LOW
 )
 from src.core.calc_payment import calculate_annuity_payment
-
-def _clamp(value: float, low: float = CLAMP_LOW, high: float = CLAMP_HIGH) -> float:
-    """Ограничение значения диапазоном (по умолчанию — диапазон нормировок факторов)"""
-    return max(low, min(high, value))
+from src.utils import clamp
 
 def _factor(key: str, value: str, normalized: float) -> dict:
     weight = SCORING_WEIGHTS[key]
@@ -130,12 +127,12 @@ def score_application(
 
     factors = [
         _factor("business_age", f"{age} мес", min(age / BUSINESS_AGE_FULL_MONTHS, 1.0)),
-        _factor("margin", f"{margin * 100:.1f}%", _clamp(margin / MARGIN_FULL_RATIO)),
-        _factor("payment_burden", f"{burden * 100:.1f}% выручки", _clamp((burden_pivot - burden) / burden_span)),
-        _factor("amount_coverage", f"{coverage:.2f} годовой выручки", _clamp((coverage_pivot - coverage) / coverage_span)),
+        _factor("margin", f"{margin * 100:.1f}%", clamp(margin / MARGIN_FULL_RATIO)),
+        _factor("payment_burden", f"{burden * 100:.1f}% выручки", clamp((burden_pivot - burden) / burden_span)),
+        _factor("amount_coverage", f"{coverage:.2f} годовой выручки", clamp((coverage_pivot - coverage) / coverage_span)),
     ]
 
-    score = round(_clamp(SCORING_BASE + sum(f["contribution"] for f in factors), 0.0, 100.0), 2)
+    score = round(clamp(SCORING_BASE + sum(f["contribution"] for f in factors), 0.0, 100.0), 2)
 
     if score >= APPROVE_SCORE:
         return ScoringResult(

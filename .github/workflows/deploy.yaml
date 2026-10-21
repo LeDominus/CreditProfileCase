@@ -1,20 +1,18 @@
 name: CI/CD
 
-# Деплой запускается только после зелёных тестов (job needs).
 on:
   push:
     branches:
       - master
-  workflow_dispatch: # ручной запуск из UI Actions
+  workflow_dispatch:
 
-# Не пускаем параллельные деплои: новый ран ждёт завершения предыдущего.
 concurrency:
   group: production
   cancel-in-progress: false
 
 jobs:
   tests:
-    name: Tests (pytest)
+    name: Backend tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,15 +30,11 @@ jobs:
       - name: Run tests
         run: python -m pytest tests -q
 
-      # Линт подключим отдельным коммитом после чистки замечаний ruff:
-      # - name: Lint (ruff)
-      #   run: ruff check .
 
   deploy:
     name: Deploy to VPS
-    needs: tests # деплой только если тесты зелёные
+    needs: tests
     runs-on: ubuntu-latest
-    # environment: production # опционально: защита с ручным approval в Settings → Environments
     steps:
       - name: Execute remote SSH commands
         uses: appleboy/ssh-action@v1.0.3
@@ -49,18 +43,14 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           port: ${{ secrets.SSH_PORT || 22 }}
           key: ${{ secrets.SSH_KEY }}
-          password: ${{ secrets.SSH_PASSWORD }} # используется, если SSH_KEY пустой
-          script_stop: true # стоп на первой ошибке (иначе ошибки в script незаметны)
+          password: ${{ secrets.SSH_PASSWORD }}
+          script_stop: true
           script: |
             set -e
             PROJECT_DIR="${{ secrets.PROJECT_DIR }}"
             REPO="https://github.com/LeDominus/CreditProfileCase.git"
             BACKEND_PORT="${BACKEND_PORT:-5555}"
 
-            # 1. Код: первый запуск — init+fetch в существующей папке (там может
-            #    уже лежать .env), дальше — жёсткая синхронизация с origin/master.
-            #    reset --hard не трогает untracked-файлы (.env, data/) — секреты
-            #    и БД остаются на месте.
             mkdir -p "$PROJECT_DIR"
             cd "$PROJECT_DIR"
             if [ ! -d .git ]; then
@@ -71,14 +61,12 @@ jobs:
             git fetch origin master
             git reset --hard origin/master
 
-            # 2. .env обязателен (в репо его нет — создаётся на VPS один раз вручную).
             if [ ! -f .env ]; then
               echo "ERROR: $PROJECT_DIR/.env not found."
               echo "Create it first: YANDEX_API_KEY, YANDEX_FOLDER, MODEL_NAME, BASE_URL, TEMPERATURE, ..."
               exit 1
             fi
 
-            # 3. Пересборка и запуск стека.
             docker compose up -d --build
             docker image prune -f
 

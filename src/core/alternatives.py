@@ -1,8 +1,6 @@
 from src.config.products import PRODUCTS, MAX_ALTERNATIVE_PRODUCTS
 from src.core.calc_payment import calculate_annuity_payment
-
-def _clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
+from src.utils import clamp
 
 
 def suggest_alternative_products(
@@ -28,10 +26,10 @@ def suggest_alternative_products(
         if age is not None and age < product["min_age"]:
             continue
 
-        alt_amount = _clamp(
+        alt_amount = clamp(
             float(amount), float(product["min_amount"]), float(product["max_amount"])
         )
-        alt_term = int(_clamp(int(term), int(product["min_term"]), int(product["max_term"])))
+        alt_term = int(clamp(int(term), int(product["min_term"]), int(product["max_term"])))
         monthly = calculate_annuity_payment(alt_amount, float(product["rate"]), alt_term)
         total = round(monthly * alt_term, 4)
         overpayment = round(total - alt_amount, 4)

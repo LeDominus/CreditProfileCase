@@ -147,3 +147,6 @@ def setup_logging(log_dir: str | Path | None = None) -> Path:
         console_handler.setFormatter(formatter)
         root.addHandler(console_handler)
     return log_file
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
