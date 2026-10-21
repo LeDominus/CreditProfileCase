@@ -12,7 +12,7 @@ class BusinessProfile:
     business_age_months: int | None
     monthly_revenue: float | None
     monthly_profit: float | None
-    preferred_term_months: int
+    preferred_term_months: int | None
     max_monthly_payment: float | None
     user_id: int | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -37,9 +37,9 @@ class ProfileRequest(BaseModel):
 class ProfileCreateRequest(BaseModel):
     """Модель создания профиля: ключевые бизнес-поля обязательны, остальные опциональны.
 
-    business_age_months опционален: профиль создаётся при первом сообщении
-    диалога, когда стаж бизнеса ещё не назван (в БД колонка nullable,
-    скоринг до уточнения вернёт needs_info).
+    business_age_months и preferred_term_months опциональны: профиль создаётся
+    при первом сообщении диалога, когда стаж бизнеса и срок ещё не названы
+    (в БД колонки nullable, скоринг до уточнения вернёт needs_info).
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -50,5 +50,5 @@ class ProfileCreateRequest(BaseModel):
     business_age_months: int | None = None
     monthly_revenue: float | None = None
     monthly_profit: float | None = None
-    preferred_term_months: int
+    preferred_term_months: int | None = None
     max_monthly_payment: float | None = None

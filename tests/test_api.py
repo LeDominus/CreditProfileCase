@@ -350,6 +350,16 @@ class TestProfile:
         # непереданные поля не затёрты
         assert patched.json()["industry"] == "общепит"
 
+    def test_create_profile_without_optional_fields(self, client):
+        """Профиль создаётся при первом сообщении — сумма и срок ещё не названы."""
+        created = client.post(
+            "/api/profile",
+            json={"industry": "IT", "funding_purpose": "Развитие"},
+        )
+        assert created.status_code == 201
+        assert created.json()["preferred_term_months"] is None
+        assert created.json()["requested_amount"] is None
+
     def test_patch_empty_body_returns_current(self, client):
         profile_id = client.post(
             "/api/profile",
