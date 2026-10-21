@@ -120,3 +120,12 @@ class TestLLMRequestLogging:
         llm.complete([{"role": "user", "content": "Привет"}], reasoning_effort="off")
         call = llm.client.chat.completions.calls[0]
         assert "extra_body" not in call
+
+    def test_complete_log_hides_model_uri(self, caplog):
+        """В логах нет ссылки модели gpt://<folder>/<model> — folder_id не утекает."""
+        llm = _make_llm(answer="Ответ")
+        with caplog.at_level(logging.INFO, logger="src.core.llm.LLMApi"):
+            llm.complete([{"role": "user", "content": "Привет"}])
+        assert "отправка запроса" in caplog.text
+        assert "gpt://" not in caplog.text
+        assert "test-folder" not in caplog.text

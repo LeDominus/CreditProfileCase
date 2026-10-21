@@ -1,4 +1,5 @@
 from src.config.scoring_config import MANUAL_REVIEW_SCORE_RANGE
+from src.core.alternatives import suggest_alternative_products
 from src.core.applications import (
     ACTOR_SYSTEM,
     ApplicationRepository,
@@ -13,10 +14,12 @@ from src.schemas.application_schema import (
     STATUS_MANUAL_REVIEW,
     STATUS_NEEDS_INFO,
     STATUS_OFFER_READY,
+    STATUS_REJECTED,
     STATUS_SCORING,
     STATUS_SUBMITTED,
     Application,
 )
+from src.schemas.scoring_schema import ScoringResult
 from src.utils import get_product, profile_to_dict
 from src.exceptions import *
 
@@ -80,19 +83,42 @@ def process_application_scoring(
         return application, result.to_dict()
 
     # Этап 3: решение (score/decision/decision_details сохраняются вместе со статусом)
+    scoring = result.to_dict()
+    if _needs_alternatives(result):
+        # п. 2.7: альтернативные продукты при отказе/несоответствии —
+        # ближайшие варианты из каталога, кроме исходного продукта
+        scoring["alternatives"] = suggest_alternative_products(
+            {
+                **profile_to_dict(profile),
+                "requested_amount": application.requested_amount,
+                "preferred_term_months": application.term_months,
+            },
+            exclude_product_id=application.product_id,
+        )
     application.score = result.score
     application.decision = result.decision
-    application.decision_details = result.to_dict()
+    application.decision_details = scoring
     application = _transition(
         app_rep, application, result.decision,
-        comment=result.to_dict().get("explanation"),
+        comment=scoring.get("explanation"),
     )
 
     # Этап 4: одобрение -> предложение готово к отклику клиента
     if result.decision in (STATUS_APPROVED, STATUS_APPROVED_WITH_CHANGES):
         application = _transition(app_rep, application, STATUS_OFFER_READY)
 
-    return application, result.to_dict()
+    return application, scoring
+
+
+def _needs_alternatives(result: ScoringResult) -> bool:
+    """Альтернативные продукты показываются при отказе, а также когда
+    подобрать изменённые условия в рамках продукта не удалось (п. 2.7)."""
+    if result.decision == STATUS_REJECTED:
+        return True
+    return (
+        result.decision == STATUS_APPROVED_WITH_CHANGES
+        and result.suggested_amount is None
+    )
 
 
 def _in_manual_review_range(score: float | None) -> bool:

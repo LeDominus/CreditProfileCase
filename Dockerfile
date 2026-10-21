@@ -3,7 +3,8 @@ FROM python:3.12-slim
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HOST=0.0.0.0
 
 COPY requirements.txt .
 
@@ -15,4 +16,4 @@ COPY src/ ./src/
 
 EXPOSE 5555
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5555"]
+CMD ["python", "main.py"]

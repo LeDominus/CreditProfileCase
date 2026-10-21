@@ -15,6 +15,7 @@ from src.schemas.application_schema import (
     STATUS_MANUAL_REVIEW,
     STATUS_NEEDS_INFO,
     STATUS_OFFER_READY,
+    STATUS_REJECTED,
     STATUS_SCORING,
     STATUS_SUBMITTED,
     Application,
@@ -147,6 +148,44 @@ class TestManualReviewTrigger:
         self._fix_score(monkeypatch, 80.0)
         application, _ = process_application_scoring(application_id, app_repo, profile_repo)
         assert application.status == STATUS_OFFER_READY
+
+
+class TestAlternativesOnRejection:
+    """п. 2.7: при отказе в decision_details попадают альтернативные продукты."""
+
+    @staticmethod
+    def _weak_profile_id(profile_repo):
+        # слабый профиль: балл ~34 < CONDITIONS_SCORE (50) -> отказ
+        return profile_repo.create_profile(
+            make_profile(
+                monthly_revenue=200_000, monthly_profit=10_000, business_age_months=6
+            )
+        )
+
+    def test_rejected_application_gets_alternatives(self, app_repo, profile_repo):
+        pid = self._weak_profile_id(profile_repo)
+        aid = app_repo.create_application(make_application(pid))
+        application, scoring = process_application_scoring(aid, app_repo, profile_repo)
+        assert scoring["decision"] == STATUS_REJECTED
+        alternatives = scoring["alternatives"]
+        assert alternatives
+        # исходный продукт (id=1) в альтернативы не попадает
+        assert all(alt["id"] != 1 for alt in alternatives)
+        for alt in alternatives:
+            assert alt["amount"] > 0
+            assert alt["monthly_payment"] > 0
+        # альтернативы сохраняются вместе с decision_details
+        stored = app_repo.get_application(aid)
+        assert stored.decision_details["alternatives"] == alternatives
+
+    def test_approved_application_has_no_alternatives(
+        self, app_repo, profile_repo, application_id
+    ):
+        application, scoring = process_application_scoring(
+            application_id, app_repo, profile_repo
+        )
+        assert scoring["decision"] == STATUS_APPROVED
+        assert "alternatives" not in scoring
 
 
 class TestErrors:

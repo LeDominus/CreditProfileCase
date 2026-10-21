@@ -1,4 +1,8 @@
 
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+from pathlib import Path
 from fastapi import HTTPException, status
 from src.config.products import PRODUCTS
 from src.core.applications import ApplicationRepository
@@ -117,3 +121,29 @@ def get_owned_profile_or_404(profile_rep: ProfileRepository, profile_id: int, us
             detail=f"Profile with id={profile_id} not found",
         )
     return profile
+
+def setup_logging(log_dir: str | Path | None = None) -> Path:
+    """Файловое логирование backend: data/logs/backend.log """
+    log_path = Path(log_dir if log_dir is not None else os.getenv("LOG_DIR", "data/logs"))
+    log_path.mkdir(parents=True, exist_ok=True)
+    log_file = log_path / "backend.log"
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    for handler in [h for h in root.handlers if isinstance(h, RotatingFileHandler)]:
+        handler.close()
+        root.removeHandler(handler)
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+    if not any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
+        for h in root.handlers
+    ):
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
+    return log_file

@@ -118,3 +118,21 @@ class ApplicationOfferResponseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     accept: bool
     decline_reason: str | None = None
+
+
+# Аудитории ИИ-объяснения решения по заявке (п. 2.8 плана MVP)
+EXPLAIN_AUDIENCES = ("client", "analyst")
+
+
+class ApplicationExplainRequest(BaseModel):
+    """Запрос ИИ-объяснения решения: для клиента или сводка для аналитика"""
+    model_config = ConfigDict(extra="forbid")
+    audience: str = "client"  # client | analyst
+
+    @model_validator(mode="after")
+    def check_audience(self):
+        if self.audience not in EXPLAIN_AUDIENCES:
+            raise ValueError(
+                f"audience must be one of {EXPLAIN_AUDIENCES} (got: {self.audience!r})"
+            )
+        return self

@@ -16,6 +16,7 @@ load_dotenv()
 # скоринговая модель и аннуитетный расчёт — общие модули с backend
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.core.scoring import score_application
+from src.core.alternatives import suggest_alternative_products
 from src.core.calc_payment import calculate_annuity_payment
 
 PRODUCTS = [
@@ -434,6 +435,17 @@ def api_application_history(application_id) -> dict:
     return api_request("GET", f"/api/applications/{application_id}/history")
 
 
+def api_explain_application(application_id, audience: str = "client") -> dict:
+    """POST /api/applications/{id}/explain — ИИ-объяснение решения по заявке
+    (audience: client — для клиента, analyst — сводка для аналитика)."""
+    return api_request(
+        "POST",
+        f"/api/applications/{application_id}/explain",
+        json={"audience": audience},
+        timeout=120,
+    )
+
+
 WELCOME_MESSAGE = (
     "Здравствуйте! Я ИИ-ассистент по подбору кредитных продуктов для малого и "
     "среднего бизнеса. Расскажите, для чего вам нужно финансирование, какая "
@@ -840,6 +852,67 @@ def render_application_history(application):
             st.markdown(line)
 
 
+def attach_alternatives(application, scoring):
+    """Демо-режим: альтернативные продукты при отказе — той же логикой,
+    что и конвейер backend (п. 2.7)."""
+    decision = scoring.get("decision")
+    if decision not in ("rejected", "approved_with_changes"):
+        return
+    if decision == "approved_with_changes" and scoring.get("suggested_amount") is not None:
+        return
+    profile = dict(st.session_state.profile)
+    profile["requested_amount"] = application.get("amount")
+    profile["preferred_term_months"] = application.get("term")
+    scoring["alternatives"] = suggest_alternative_products(
+        profile, exclude_product_id=application.get("product_id")
+    )
+
+
+def create_alternative_application(application, alternative):
+    """Оформление заявки на альтернативный продукт после отказа (п. 2.7):
+    новый черновик с суммой/сроком, вписанными в диапазон продукта."""
+    try:
+        profile_id = ensure_backend_profile()
+        created = api_create_application(
+            profile_id,
+            alternative["id"],
+            int(alternative["amount"]),
+            int(alternative["term_months"]),
+        )
+    except requests.RequestException as exc:
+        logger.error("Не удалось создать заявку на альтернативу: %s", exc)
+        st.error(f"Заявка не создана: backend недоступен ({exc}).")
+        return False
+    new_application = created.get("application") or {}
+    record = {
+        "id": new_application.get("id"),
+        "product_name": new_application.get("product_name", alternative.get("name")),
+        "product_id": alternative.get("id"),
+        "amount": int(alternative.get("amount")),
+        "term": int(alternative.get("term_months")),
+        "monthly_payment": new_application.get(
+            "monthly_payment", alternative.get("monthly_payment")
+        ),
+        "total_repayment": new_application.get(
+            "total_repayment", alternative.get("total_repayment")
+        ),
+        "overpayment": new_application.get("overpayment", alternative.get("overpayment")),
+        "status": new_application.get("status", "draft"),
+        "score": None,
+        "decision_details": {},
+        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+    }
+    st.session_state.applications.insert(0, record)
+    message = (
+        f"Заявка № {record['id']} на продукт «{record['product_name']}» сохранена "
+        "как черновик — альтернатива после отказа. Проверьте параметры и отправьте "
+        "её на обработку в разделе «Мои заявки»."
+    )
+    message += " Решение демонстрационное и не является офертой банка."
+    st.session_state.messages.append({"role": "assistant", "content": message})
+    return True
+
+
 def rescore_application(application):
     """Повторная обработка после уточнения данных (needs_info -> решение -> предложение)."""
     product = find_application_product(application)
@@ -866,6 +939,7 @@ def rescore_application(application):
         # демо-режим: одобрение отображаем как готовое предложение (offer_ready)
         application["status"] = DECISION_OFFER_STATUSES.get(decision, decision)
         application["score"] = scoring.get("score")
+        attach_alternatives(application, scoring)
         application["decision_details"] = scoring
     explanation = (application.get("decision_details") or {}).get(
         "explanation", "Повторный скоринг выполнен."
@@ -1254,6 +1328,42 @@ with product_col:
             )
             if details.get("explanation"):
                 st.caption(details["explanation"])
+            if details.get("factors"):
+                with st.expander("Разбор решения", key=f"app_factors_{application.get('id')}"):
+                    for factor in details["factors"]:
+                        contribution = factor.get("contribution")
+                        contribution_line = (
+                            f" · вклад в балл: {contribution:+g}"
+                            if contribution is not None
+                            else ""
+                        )
+                        st.markdown(
+                            f"**{factor.get('label', factor.get('name'))}** — "
+                            f"{factor.get('value')}{contribution_line}"
+                        )
+                    missing = details.get("missing_fields") or []
+                    if missing:
+                        st.caption(
+                            "Полнота данных: не заполнены поля — " + ", ".join(missing) + "."
+                        )
+                    else:
+                        st.caption("Полнота данных: все обязательные поля профиля заполнены.")
+                    st.caption(
+                        "Стоп-факторы: не зафиксированы (проверка данных пройдена автоматически)."
+                    )
+            if details.get("decision") and not DEMO_MODE:
+                if st.button(
+                    "Объяснить решение (ИИ)",
+                    key=f"app_explain_{application.get('id')}",
+                ):
+                    try:
+                        result = api_explain_application(application["id"])
+                    except requests.RequestException as exc:
+                        logger.error("ИИ-объяснение недоступно: %s", exc)
+                        st.warning("ИИ-объяснение недоступно: backend не отвечает.")
+                    else:
+                        if result.get("status") == "success" and result.get("explanation"):
+                            st.info(result["explanation"])
             if status_key == "draft":
                 if st.button(
                     "Отправить заявку",
@@ -1350,6 +1460,37 @@ with product_col:
                 ):
                     if rescore_application(application):
                         st.rerun()
+            elif status_key == "rejected":
+                # п. 2.7: альтернативные продукты при отказе
+                alternatives = details.get("alternatives") or []
+                if alternatives:
+                    with st.expander(
+                        "Альтернативные предложения",
+                        key=f"app_alt_{application.get('id')}",
+                    ):
+                        st.caption(
+                            "Запрошенный продукт не подошёл профилю бизнеса — "
+                            "вот ближайшие альтернативы банка."
+                        )
+                        for alt in alternatives:
+                            reduced = " · сумма снижена" if alt.get("amount_reduced") else ""
+                            st.markdown(
+                                f"**{alt.get('name')}** ({alt.get('rate'):g}% годовых{reduced}): "
+                                f"{money(alt.get('amount'))} на {alt.get('term_months')} мес · "
+                                f"платёж ≈ {money(alt.get('monthly_payment'))}/мес"
+                            )
+                        best = alternatives[0]
+                        if not DEMO_MODE and st.button(
+                            f"Оформить заявку: {best.get('name')}",
+                            key=f"app_alt_create_{application.get('id')}",
+                            use_container_width=True,
+                        ):
+                            if create_alternative_application(application, best):
+                                st.success(
+                                    "Заявка-альтернатива создана черновиком — "
+                                    "проверьте параметры и отправьте её."
+                                )
+                                st.rerun()
             if not DEMO_MODE:
                 render_application_history(application)
 

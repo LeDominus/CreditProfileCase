@@ -174,6 +174,11 @@ class TestSubmitEndpoint:
         application = create_application(client, profile_id=profile_id)
         body = submit_application(client, application["id"])
         assert body["application"]["status"] == "rejected"
+        # п. 2.7: при отказе клиент получает альтернативные продукты
+        alternatives = body["application"]["decision_details"]["alternatives"]
+        assert alternatives
+        assert all(alt["id"] != 1 for alt in alternatives)
+        assert body["scoring"]["alternatives"] == alternatives
 
     def test_submit_twice_409(self, client):
         application = create_application(client)
@@ -428,3 +433,75 @@ class TestGetApplications:
 
     def test_list_applications_missing_profile_404(self, client):
         assert client.get("/api/profile/999/applications").status_code == 404
+
+
+class TestExplainEndpoint:
+    """п. 2.8: POST /api/applications/{id}/explain — ИИ-объяснение решения."""
+
+    @staticmethod
+    def rejected_application(client):
+        profile_id = create_profile(
+            client, monthly_revenue=200_000, monthly_profit=10_000, business_age_months=6
+        )
+        application = create_application(client, profile_id=profile_id)
+        body = submit_application(client, application["id"])
+        assert body["application"]["status"] == "rejected"
+        return application
+
+    def test_explain_rejected_application(self, client):
+        application = self.rejected_application(client)
+        response = client.post(f"/api/applications/{application['id']}/explain")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["application_id"] == application["id"]
+        assert body["audience"] == "client"
+        assert body["source"] == "llm"
+        assert body["explanation"] == "Расскажите подробнее о вашем бизнесе."
+
+    def test_explain_analyst_audience(self, client):
+        application = self.rejected_application(client)
+        response = client.post(
+            f"/api/applications/{application['id']}/explain",
+            json={"audience": "analyst"},
+        )
+        assert response.status_code == 200
+        assert response.json()["audience"] == "analyst"
+
+    def test_explain_without_decision_409(self, client):
+        application = create_application(client)  # черновик — решения ещё нет
+        response = client.post(f"/api/applications/{application['id']}/explain")
+        assert response.status_code == 409
+
+    def test_explain_invalid_audience_422(self, client):
+        application = self.rejected_application(client)
+        response = client.post(
+            f"/api/applications/{application['id']}/explain",
+            json={"audience": "manager"},
+        )
+        assert response.status_code == 422
+
+    def test_explain_missing_application_404(self, client):
+        assert client.post("/api/applications/999/explain").status_code == 404
+
+    def test_explain_foreign_application_404(self, client):
+        application = self.rejected_application(client)
+        headers = other_user_headers(client)
+        response = client.post(
+            f"/api/applications/{application['id']}/explain", headers=headers
+        )
+        assert response.status_code == 404
+
+    def test_explain_llm_failure_returns_fallback(self, client):
+        application = self.rejected_application(client)
+
+        class FailingLLM(ChatStubLLM):
+            def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+                raise RuntimeError("LLM unavailable")
+
+        client.app.state.llmAPI = FailingLLM()
+        response = client.post(f"/api/applications/{application['id']}/explain")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["source"] == "fallback"
+        assert "Балл" in body["explanation"]

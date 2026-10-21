@@ -92,13 +92,8 @@ class LLMApi:
         reasoning_effort: str | None = None,
     ) -> str:
         """Запрос к LLM с подготовленным контекстом"""
-        logger.info(
-            "--> LLM: отправка запроса (model=%s, сообщений: %d, temperature=%s%s)",
-            self.model_uri,
-            len(context),
-            TEMPERATURE if temperature is None else temperature,
-            f", reasoning_effort={reasoning_effort}" if reasoning_effort else "",
-        )
+        logger.info("--> LLM: отправка запроса... ")
+        
         started = time.perf_counter()
         effective_temperature = TEMPERATURE if temperature is None else temperature
         effective_max_tokens = MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens

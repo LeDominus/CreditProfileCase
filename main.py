@@ -1,10 +1,12 @@
 ﻿import logging
+import os
 import uvicorn
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import Depends, FastAPI, HTTPException, Header, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from src.core.llm.extract_pipeline import extract_content
+from src.core.llm.explain_pipeline import explain_application_decision
 from src.config.products import PRODUCTS
 from src.core.llm.LLMApi import LLMApi
 from src.core.applications import (
@@ -56,6 +58,7 @@ from src.schemas.application_schema import (
     STATUS_SUBMITTED,
     Application,
     ApplicationCreateRequest,
+    ApplicationExplainRequest,
     ApplicationOfferResponseRequest,
     ApplicationUpdateRequest,
 )
@@ -86,17 +89,15 @@ from src.utils import (
     application_response,
     get_owned_application_or_404,
     get_owned_conversation_or_404,
-    get_owned_profile_or_404,
+    get_owned_profile_or_404, setup_logging,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logger = logging.getLogger(__name__)
+setup_logging()
 
 @asynccontextmanager
 async def lifespan(app):
-    print("Запуск приложения...")
+    logger.info("Запуск приложения...")
     try:
         app.state.dbConn = DatabaseConnector()
     except Exception as e:
@@ -140,7 +141,7 @@ async def lifespan(app):
     except Exception as e:
         raise RuntimeError
 
-    print("Приложение успешно запущено!")
+    logger.info("Приложение успешно запущено!")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -644,6 +645,37 @@ def get_application_history(
     return {"status": "success", "application_id": application_id, "history": history}
 
 
+@app.post("/api/applications/{application_id}/explain")
+def explain_application(
+    application_id: int,
+    payload: ApplicationExplainRequest | None = None,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+    llm: LLMApi = Depends(load_LLM),
+) -> dict:
+    """ИИ-объяснение решения по заявке только по зафиксированным факторам из decision_details"""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    if not application.decision or not application.decision_details:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Explanation is available only after a decision is made "
+                f"(current status: '{application.status}')"
+            ),
+        )
+    audience = payload.audience if payload is not None else "client"
+    try:
+        result = explain_application_decision(
+            llm, application_response(application), audience
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to explain decision: {str(e)}")
+    return {"status": "success", "application_id": application_id, **result}
+
+
 @app.get("/api/applications/{application_id}")
 def get_application(
     application_id: int,
@@ -685,4 +717,9 @@ def get_products() -> list[dict]:
 
 
 if __name__ == "__main__":
-    uvicorn.run(host = "127.0.0.1", app = app, port=5555)
+    uvicorn.run(
+        app,
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "5555")),
+        log_config=None,
+    )
