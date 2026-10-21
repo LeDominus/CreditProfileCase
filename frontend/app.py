@@ -84,8 +84,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_BASE_URL = "http://127.0.0.1:5555"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:5555")
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+
+# Поля профиля, обязательные для отправки заявки: ассистент уточняет их в диалоге,
+# пока все не заполнены (зеркало REQUIRED_PROFILE_FIELDS бэкенда)
+REQUIRED_PROFILE_FIELDS = {
+    "business_age_months": "срок работы бизнеса (в месяцах)",
+    "monthly_revenue": "выручка в месяц (руб.)",
+    "monthly_profit": "прибыль в месяц (руб.)",
+}
 
 logger = logging.getLogger("frontend")
 logging.basicConfig(
@@ -95,17 +103,26 @@ logging.basicConfig(
 
 STATUS_LABELS = {
     "draft": ("Черновик", "⚪"),
-    "submitted": ("Отправлена · демо", "🔵"),
-    "scoring": ("На скоринге · демо", "🟣"),
-    "approved": ("Одобрена · демо", "🟢"),
-    "approved_with_changes": ("Одобрена с изменениями · демо", "🟡"),
-    "rejected": ("Отказ · демо", "🔴"),
-    "needs_info": ("Нужны данные · демо", "🟠"),
-    "issued": ("Выдана · симуляция", "✅"),
+    "submitted": ("Отправлена", "🔵"),
+    "data_check": ("Проверка данных", "🟣"),
+    "scoring": ("На скоринге", "🟣"),
+    "needs_info": ("Нужны данные", "🟠"),
+    "manual_review": ("Ручная экспертиза", "🟠"),
+    "approved": ("Одобрена", "🟢"),
+    "approved_with_changes": ("Одобрена с изменениями", "🟡"),
+    "rejected": ("Отказ", "🔴"),
+    "offer_ready": ("Предложение готово", "🟢"),
+    "accepted": ("Условия приняты", "🟢"),
+    "signed": ("Подписана", "✅"),
+    "issued": ("Выдана", "✅"),
+    "client_declined": ("Вы отказались от предложения", "⚪"),
     "demo_received": ("Заявка получена · демо", "🔵"),
     "demo_review": ("Демо-проверка", "🟠"),
     "error": ("Ошибка", "🔴"),
 }
+
+# Решения скоринга, после которых банк формирует предложение (статус offer_ready)
+DECISION_OFFER_STATUSES = {"approved": "offer_ready", "approved_with_changes": "offer_ready"}
 
 
 def money(value):
@@ -146,6 +163,7 @@ def format_message_text(text):
     """
     safe = (
         str(text)
+        .strip()  # убираем ведущие/замыкающие отступы и переводы строк
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
@@ -378,21 +396,49 @@ def api_create_application(profile_id, product_id, amount, term) -> dict:
 
 
 def api_score_application(application_id) -> dict:
-    """POST /api/applications/{id}/scoring — скоринг заявки на backend."""
+    """POST /api/applications/{id}/scoring — повторная обработка заявки на backend."""
     return api_request("POST", f"/api/applications/{application_id}/scoring")
 
 
-def api_confirm_application(application_id) -> dict:
-    """POST /api/applications/{id}/confirm — финальное подтверждение заявки."""
+def api_submit_application(application_id) -> dict:
+    """POST /api/applications/{id}/submit — отправка черновика + автозапуск конвейера."""
+    return api_request("POST", f"/api/applications/{application_id}/submit")
+
+
+def api_update_application(application_id, amount, term) -> dict:
+    """PATCH /api/applications/{id} — правка суммы/срока черновика с пересчётом аннуитета."""
     return api_request(
-        "POST", f"/api/applications/{application_id}/confirm", json={"confirmed": True}
+        "PATCH",
+        f"/api/applications/{application_id}",
+        json={"requested_amount": int(amount), "term_months": int(term)},
     )
+
+
+def api_offer_response(application_id, accept: bool, decline_reason=None) -> dict:
+    """POST /api/applications/{id}/offer-response — отклик клиента на предложение."""
+    payload = {"accept": accept}
+    if decline_reason:
+        payload["decline_reason"] = decline_reason
+    return api_request(
+        "POST", f"/api/applications/{application_id}/offer-response", json=payload
+    )
+
+
+def api_sign_application(application_id) -> dict:
+    """POST /api/applications/{id}/sign — подписание договора (ЭП моделируется кнопкой)."""
+    return api_request("POST", f"/api/applications/{application_id}/sign")
+
+
+def api_application_history(application_id) -> dict:
+    """GET /api/applications/{id}/history — история смены статусов заявки."""
+    return api_request("GET", f"/api/applications/{application_id}/history")
 
 
 WELCOME_MESSAGE = (
     "Здравствуйте! Я ИИ-ассистент по подбору кредитных продуктов для малого и "
     "среднего бизнеса. Расскажите, для чего вам нужно финансирование, какая "
-    "сумма требуется и на какой срок."
+    "сумма требуется и на какой срок. Для отправки заявки мне также понадобятся "
+    "срок работы бизнеса, выручка и прибыль в месяц."
 )
 
 
@@ -582,9 +628,8 @@ def run_local_scoring(product, amount, term, monthly):
 
 
 def submit_application(product, amount, term):
-    """Создание заявки и скоринг: консультация -> профиль -> скоринг -> решение."""
+    """Создание черновика заявки: консультация -> профиль -> черновик (без скоринга)."""
     monthly, total, overpayment = payment_calculation(amount, product["rate"], term)
-    scoring = None
     application_id = str(uuid.uuid4())[:8].upper()
     if not DEMO_MODE:
         try:
@@ -594,17 +639,13 @@ def submit_application(product, amount, term):
             )
             application = created.get("application") or {}
             application_id = application.get("id", application_id)
-            scored = api_score_application(application_id)
-            application = scored.get("application") or application
-            scoring = scored.get("scoring")
-            status = application.get("status", "submitted")
+            status = application.get("status", "draft")
         except requests.RequestException as exc:
-            logger.error("Не удалось провести заявку через backend: %s", exc)
-            st.error(f"Заявка не отправлена: backend недоступен ({exc}).")
+            logger.error("Не удалось создать заявку на backend: %s", exc)
+            st.error(f"Заявка не создана: backend недоступен ({exc}).")
             return False
     else:
-        scoring = run_local_scoring(product, amount, term, monthly)
-        status = scoring.get("decision", "demo_received")
+        status = "draft"
 
     application_record = {
         "id": application_id,
@@ -616,51 +657,26 @@ def submit_application(product, amount, term):
         "total_repayment": float(total),
         "overpayment": float(overpayment),
         "status": status,
-        "score": (scoring or {}).get("score"),
-        "decision_details": scoring or {},
+        "score": None,
+        "decision_details": {},
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
     st.session_state.applications.insert(0, application_record)
     st.session_state.show_confirm = False
 
     label = STATUS_LABELS.get(status, ("Получена", "🔵"))[0]
-    message = f"Заявка № {application_id} создана и прошла скоринг. Текущий статус: «{label}»."
-    explanation = (scoring or {}).get("explanation")
-    if explanation:
-        message += f" {explanation}"
+    message = (
+        f"Заявка № {application_id} сохранена как черновик (статус «{label}»). "
+        "Отправьте её на обработку в разделе «Мои заявки», когда будете готовы."
+    )
     message += " Решение демонстрационное и не является офертой банка."
     st.session_state.messages.append({"role": "assistant", "content": message})
     return True
 
 
-def confirm_application(application):
-    """Финальное подтверждение клиента: approved* -> issued (выдача смоделирована)."""
-    if not DEMO_MODE:
-        try:
-            result = api_confirm_application(application["id"])
-            updated = result.get("application") or {}
-            application["status"] = updated.get("status", "issued")
-        except requests.RequestException as exc:
-            logger.error("Не удалось подтвердить заявку на backend: %s", exc)
-            st.error(f"Не удалось подтвердить заявку: {exc}")
-            return False
-    else:
-        application["status"] = "issued"
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": (
-                f"Заявка № {application['id']} подтверждена. Выдача финансирования "
-                "смоделирована: в демо-режиме деньги не переводятся."
-            ),
-        }
-    )
-    return True
-
-
-def rescore_application(application):
-    """Повторный скоринг после уточнения данных (needs_info -> решение)."""
-    product = next(
+def find_application_product(application):
+    """Продукт заявки по product_id из каталога (backend или локального)."""
+    return next(
         (
             p
             for p in (st.session_state.products or PRODUCTS)
@@ -668,6 +684,165 @@ def rescore_application(application):
         ),
         None,
     )
+
+
+def send_application(application):
+    """Отправка черновика на обработку: draft -> submitted (+ конвейер на backend)."""
+    if not DEMO_MODE:
+        try:
+            result = api_submit_application(application["id"])
+        except requests.RequestException as exc:
+            logger.error("Не удалось отправить заявку на backend: %s", exc)
+            st.error(f"Заявка не отправлена: {exc}")
+            return False
+        updated = result.get("application") or {}
+        scoring = result.get("scoring") or {}
+        application["status"] = updated.get("status", application["status"])
+        application["score"] = updated.get("score")
+        application["decision_details"] = scoring or (updated.get("decision_details") or {})
+        explanation = (application.get("decision_details") or {}).get("explanation")
+        message = f"Заявка № {application['id']} отправлена и обработана."
+        if explanation:
+            message += f" {explanation}"
+        message += " Решение демонстрационное и не является офертой банка."
+        st.session_state.messages.append({"role": "assistant", "content": message})
+        return True
+    # демо-режим: локальный скоринг той же моделью, одобрение -> предложение
+    return rescore_application(application)
+
+
+def update_draft(application, amount, term):
+    """Правка черновика: сумма/срок с пересчётом аннуитета (PATCH на backend)."""
+    if not DEMO_MODE:
+        try:
+            result = api_update_application(application["id"], int(amount), int(term))
+        except requests.RequestException as exc:
+            logger.error("Не удалось сохранить черновик на backend: %s", exc)
+            st.error(f"Изменения не сохранены: {exc}")
+            return False
+        updated = result.get("application") or {}
+        application["amount"] = updated.get("requested_amount", application["amount"])
+        application["term"] = updated.get("term_months", application["term"])
+        application["monthly_payment"] = updated.get(
+            "monthly_payment", application["monthly_payment"]
+        )
+        application["total_repayment"] = updated.get(
+            "total_repayment", application["total_repayment"]
+        )
+        application["overpayment"] = updated.get("overpayment", application["overpayment"])
+        return True
+    product = find_application_product(application)
+    if product is None:
+        st.error("Продукт заявки не найден в каталоге.")
+        return False
+    monthly, total, overpayment = payment_calculation(amount, product["rate"], term)
+    application["amount"] = int(amount)
+    application["term"] = int(term)
+    application["monthly_payment"] = float(monthly)
+    application["total_repayment"] = float(total)
+    application["overpayment"] = float(overpayment)
+    return True
+
+
+def accept_offer(application):
+    """Принятие предложения: offer_ready -> accepted."""
+    if not DEMO_MODE:
+        try:
+            result = api_offer_response(application["id"], accept=True)
+        except requests.RequestException as exc:
+            logger.error("Не удалось принять предложение: %s", exc)
+            st.error(f"Не удалось принять предложение: {exc}")
+            return False
+        application["status"] = (result.get("application") or {}).get("status", "accepted")
+    else:
+        application["status"] = "accepted"
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                f"Условия по заявке № {application['id']} приняты. "
+                "Можно подписывать договор."
+            ),
+        }
+    )
+    return True
+
+
+def decline_offer(application):
+    """Отказ от предложения: offer_ready -> client_declined."""
+    if not DEMO_MODE:
+        try:
+            result = api_offer_response(application["id"], accept=False)
+        except requests.RequestException as exc:
+            logger.error("Не удалось отклонить предложение: %s", exc)
+            st.error(f"Не удалось отклонить предложение: {exc}")
+            return False
+        application["status"] = (result.get("application") or {}).get(
+            "status", "client_declined"
+        )
+    else:
+        application["status"] = "client_declined"
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                f"Предложение по заявке № {application['id']} отклонено. "
+                "Вы можете создать новую заявку на других условиях."
+            ),
+        }
+    )
+    return True
+
+
+def sign_application(application):
+    """Подписание договора (ЭП моделируется кнопкой): accepted -> signed -> issued."""
+    if not DEMO_MODE:
+        try:
+            result = api_sign_application(application["id"])
+        except requests.RequestException as exc:
+            logger.error("Не удалось подписать договор на backend: %s", exc)
+            st.error(f"Не удалось подписать договор: {exc}")
+            return False
+        application["status"] = (result.get("application") or {}).get("status", "issued")
+    else:
+        application["status"] = "issued"
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                f"Договор по заявке № {application['id']} подписан. "
+                "Выдача финансирования смоделирована: в демо-режиме деньги не переводятся."
+            ),
+        }
+    )
+    return True
+
+
+def render_application_history(application):
+    """Таймлайн истории статусов: «статус — дата — комментарий»."""
+    with st.expander("История статусов", key=f"app_history_{application.get('id')}"):
+        try:
+            result = api_application_history(application["id"])
+        except requests.RequestException as exc:
+            logger.error("История статусов недоступна: %s", exc)
+            st.caption("История недоступна: backend не отвечает.")
+            return
+        history = result.get("history") or []
+        if not history:
+            st.caption("История пуста.")
+            return
+        for item in history:
+            to_label = STATUS_LABELS.get(item.get("to_status"), (item.get("to_status"), ""))[0]
+            when = str(item.get("created_at", ""))[:16].replace("T", " ")
+            line = f"**{to_label}** — {when}"
+            if item.get("comment"):
+                line += f" — {item['comment']}"
+            st.markdown(line)
+
+
+def rescore_application(application):
+    """Повторная обработка после уточнения данных (needs_info -> решение -> предложение)."""
+    product = find_application_product(application)
     if product is None:
         st.error("Продукт заявки не найден в каталоге.")
         return False
@@ -680,14 +855,16 @@ def rescore_application(application):
             application["score"] = updated.get("score")
             application["decision_details"] = scoring
         except requests.RequestException as exc:
-            logger.error("Повторный скоринг не выполнен: %s", exc)
-            st.error(f"Повторный скоринг не выполнен: {exc}")
+            logger.error("Повторная обработка не выполнена: %s", exc)
+            st.error(f"Повторная обработка не выполнена: {exc}")
             return False
     else:
         scoring = run_local_scoring(
             product, application["amount"], application["term"], application["monthly_payment"]
         )
-        application["status"] = scoring.get("decision", application["status"])
+        decision = scoring.get("decision", application["status"])
+        # демо-режим: одобрение отображаем как готовое предложение (offer_ready)
+        application["status"] = DECISION_OFFER_STATUSES.get(decision, decision)
         application["score"] = scoring.get("score")
         application["decision_details"] = scoring
     explanation = (application.get("decision_details") or {}).get(
@@ -933,7 +1110,22 @@ with chat_col:
         try:
             if DEMO_MODE:
                 time.sleep(0.8)
-                reply_text = "Спасибо, я принял описание. Расскажите о сумме, цели и сроке — я зафиксирую параметры в профиле. Затем нажмите «Подобрать продукты»."
+                missing = [
+                    label
+                    for key, label in REQUIRED_PROFILE_FIELDS.items()
+                    if st.session_state.profile.get(key) is None
+                ]
+                if missing:
+                    reply_text = (
+                        "Спасибо, я принял описание. Для отправки заявки не хватает "
+                        "данных: " + ", ".join(missing) + ". Уточните их, а также "
+                        "сумму, цель и срок финансирования."
+                    )
+                else:
+                    reply_text = (
+                        "Спасибо, все обязательные параметры зафиксированы. "
+                        "Нажмите «Подобрать продукты» — подберу варианты под ваш запрос."
+                    )
             else:
                 # Профиль на backend создаётся при первом сообщении —
                 # тогда конвейер извлекает поля из каждого сообщения диалога
@@ -1062,40 +1254,104 @@ with product_col:
             )
             if details.get("explanation"):
                 st.caption(details["explanation"])
-            if status_key == "approved_with_changes" and details.get("suggested_amount"):
-                term_hint = (
-                    f" на {details['suggested_term_months']} мес"
-                    if details.get("suggested_term_months")
-                    else ""
-                )
-                st.info(
-                    f"Предложение банка: сумма {money(details['suggested_amount'])}{term_hint}, "
-                    f"платёж ≈ {money(details.get('suggested_monthly_payment'))}/мес."
-                )
-            if status_key in ("approved", "approved_with_changes"):
+            if status_key == "draft":
                 if st.button(
-                    "Подтвердить условия и получить финансирование",
-                    key=f"app_confirm_{application.get('id')}",
+                    "Отправить заявку",
+                    key=f"app_submit_{application.get('id')}",
                     type="primary",
                     use_container_width=True,
                 ):
-                    if confirm_application(application):
-                        st.success("Заявка подтверждена. Выдача смоделирована.")
+                    if send_application(application):
+                        st.success("Заявка отправлена на обработку.")
+                        st.rerun()
+                product = find_application_product(application)
+                if product is not None:
+                    with st.expander("Изменить сумму и срок", key=f"app_edit_{application.get('id')}"):
+                        rate = float(product.get("rate", 18.9))
+                        new_amount = st.number_input(
+                            "Сумма заявки, ₽",
+                            min_value=int(product.get("min_amount", 100_000)),
+                            max_value=int(product.get("max_amount", 50_000_000)),
+                            step=100_000,
+                            value=int(application.get("amount")),
+                            key=f"edit_amount_{application.get('id')}",
+                        )
+                        new_term = st.number_input(
+                            "Срок заявки, месяцев",
+                            min_value=int(product.get("min_term", 3)),
+                            max_value=int(product.get("max_term", 60)),
+                            value=int(application.get("term")),
+                            key=f"edit_term_{application.get('id')}",
+                        )
+                        monthly, total, _ = payment_calculation(new_amount, rate, new_term)
+                        st.caption(
+                            f"Платёж ≈ {money(monthly)}/мес · всего к возврату {money(total)}"
+                        )
+                        if st.button(
+                            "Сохранить изменения",
+                            key=f"app_save_{application.get('id')}",
+                            use_container_width=True,
+                        ):
+                            if update_draft(application, new_amount, new_term):
+                                st.success("Изменения сохранены.")
+                                st.rerun()
+            elif status_key == "offer_ready":
+                if details.get("decision") == "approved_with_changes" and details.get(
+                    "suggested_amount"
+                ):
+                    term_hint = (
+                        f" на {details['suggested_term_months']} мес"
+                        if details.get("suggested_term_months")
+                        else ""
+                    )
+                    st.info(
+                        f"Предложение банка: сумма {money(details['suggested_amount'])}{term_hint}, "
+                        f"платёж ≈ {money(details.get('suggested_monthly_payment'))}/мес."
+                    )
+                accept_col, decline_col = st.columns(2)
+                with accept_col:
+                    if st.button(
+                        "Принять условия",
+                        key=f"app_accept_{application.get('id')}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        if accept_offer(application):
+                            st.rerun()
+                with decline_col:
+                    if st.button(
+                        "Отклонить предложение",
+                        key=f"app_decline_{application.get('id')}",
+                        use_container_width=True,
+                    ):
+                        if decline_offer(application):
+                            st.rerun()
+            elif status_key == "accepted":
+                if st.button(
+                    "Подписать договор",
+                    key=f"app_sign_{application.get('id')}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    if sign_application(application):
+                        st.success("Договор подписан. Выдача смоделирована.")
                         st.rerun()
             elif status_key == "needs_info":
                 missing = ", ".join(details.get("missing_fields") or [])
                 st.warning(
                     "Уточните данные о бизнесе в диалоге"
                     + (f": {missing}" if missing else "")
-                    + " — затем отправьте заявку на повторный скоринг."
+                    + " — затем отправьте заявку на повторную обработку."
                 )
                 if st.button(
-                    "Отправить на повторный скоринг",
+                    "Отправить на повторную обработку",
                     key=f"app_rescore_{application.get('id')}",
                     use_container_width=True,
                 ):
                     if rescore_application(application):
                         st.rerun()
+            if not DEMO_MODE:
+                render_application_history(application)
 
 
    

@@ -1,4 +1,4 @@
-"""Интеграционные тесты конвейера заявок: создание -> скоринг -> подтверждение."""
+"""Интеграционные тесты жизненного цикла заявки: draft -> submit -> решение -> отклик -> подписание."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,11 +50,24 @@ def create_application(client, profile_id=None, product_id=1, amount=1_500_000, 
     return response.json()["application"]
 
 
+def submit_application(client, application_id):
+    response = client.post(f"/api/applications/{application_id}/submit")
+    assert response.status_code == 200
+    return response.json()
+
+
+def other_user_headers(client, username="intruder"):
+    token = client.post(
+        "/api/auth/register", json={"username": username, "password": "secret123"}
+    ).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 class TestCreateApplication:
-    def test_create_submitted_application(self, client):
+    def test_create_draft_application(self, client):
         profile_id = create_profile(client)
         application = create_application(client, profile_id=profile_id)
-        assert application["status"] == "submitted"
+        assert application["status"] == "draft"
         assert application["profile_id"] == profile_id
         assert application["product_name"] == "Оборотный капитал"
         assert application["monthly_payment"] > 0
@@ -117,16 +130,24 @@ class TestCreateApplication:
         )
         assert response.status_code == 422
 
+    def test_create_business_age_below_minimum_422(self, client):
+        profile_id = create_profile(client, business_age_months=3)
+        response = client.post(
+            "/api/applications",
+            json={
+                "profile_id": profile_id,
+                "product_id": 1,
+                "requested_amount": 1_000_000,
+                "term_months": 12,
+            },
+        )
+        assert response.status_code == 422
 
-class TestScoringEndpoint:
-    def test_full_path_to_approval(self, client):
+
+class TestSubmitEndpoint:
+    def test_submit_runs_pipeline_to_offer_ready(self, client):
         application = create_application(client)
-        application_id = application["id"]
-
-        response = client.post(f"/api/applications/{application_id}/scoring")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "success"
+        body = submit_application(client, application["id"])
 
         scoring = body["scoring"]
         assert scoring["decision"] == "approved"
@@ -134,21 +155,45 @@ class TestScoringEndpoint:
         assert len(scoring["factors"]) == 4
 
         stored = body["application"]
-        assert stored["status"] == "approved"
+        assert stored["status"] == "offer_ready"
         assert stored["score"] == scoring["score"]
         assert stored["decision"] == "approved"
         assert stored["decision_details"]["explanation"]
 
-    def test_scoring_needs_info_then_rescore(self, client):
-        # профиль без финансовых данных -> needs_info
+    def test_submit_needs_info(self, client):
         profile_id = create_profile(client, monthly_revenue=None, monthly_profit=None)
         application = create_application(client, profile_id=profile_id)
-        response = client.post(f"/api/applications/{application['id']}/scoring")
-        assert response.status_code == 200
-        assert response.json()["application"]["status"] == "needs_info"
-        assert response.json()["scoring"]["missing_fields"]
+        body = submit_application(client, application["id"])
+        assert body["application"]["status"] == "needs_info"
+        assert body["scoring"]["missing_fields"]
 
-        # клиент уточнил данные -> повторный скоринг даёт решение
+    def test_submit_rejected_for_weak_profile(self, client):
+        profile_id = create_profile(
+            client, monthly_revenue=200_000, monthly_profit=10_000, business_age_months=6
+        )
+        application = create_application(client, profile_id=profile_id)
+        body = submit_application(client, application["id"])
+        assert body["application"]["status"] == "rejected"
+
+    def test_submit_twice_409(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        response = client.post(f"/api/applications/{application['id']}/submit")
+        assert response.status_code == 409
+
+    def test_submit_missing_application_404(self, client):
+        assert client.post("/api/applications/999/submit").status_code == 404
+
+
+class TestScoringEndpoint:
+    """Повторная обработка после needs_info (уточнение данных профиля)."""
+
+    def test_rescore_after_needs_info(self, client):
+        profile_id = create_profile(client, monthly_revenue=None, monthly_profit=None)
+        application = create_application(client, profile_id=profile_id)
+        body = submit_application(client, application["id"])
+        assert body["application"]["status"] == "needs_info"
+
         patch = client.patch(
             f"/api/profile/{profile_id}",
             json={
@@ -160,20 +205,15 @@ class TestScoringEndpoint:
         assert patch.status_code == 200
         response = client.post(f"/api/applications/{application['id']}/scoring")
         assert response.status_code == 200
-        assert response.json()["application"]["status"] == "approved"
+        assert response.json()["application"]["status"] == "offer_ready"
 
-    def test_scoring_rejected_for_weak_profile(self, client):
-        profile_id = create_profile(
-            client, monthly_revenue=200_000, monthly_profit=10_000, business_age_months=6
-        )
-        application = create_application(client, profile_id=profile_id)
-        response = client.post(f"/api/applications/{application['id']}/scoring")
-        assert response.status_code == 200
-        assert response.json()["application"]["status"] == "rejected"
+    def test_scoring_draft_409(self, client):
+        application = create_application(client)
+        assert client.post(f"/api/applications/{application['id']}/scoring").status_code == 409
 
     def test_double_scoring_409(self, client):
         application = create_application(client)
-        assert client.post(f"/api/applications/{application['id']}/scoring").status_code == 200
+        submit_application(client, application["id"])
         response = client.post(f"/api/applications/{application['id']}/scoring")
         assert response.status_code == 409
 
@@ -181,45 +221,187 @@ class TestScoringEndpoint:
         assert client.post("/api/applications/999/scoring").status_code == 404
 
 
-class TestConfirmEndpoint:
-    def test_confirm_approved_application_issues(self, client):
+class TestUpdateDraftEndpoint:
+    def test_patch_draft_recalculates_payments(self, client):
         application = create_application(client)
-        application_id = application["id"]
-        assert client.post(f"/api/applications/{application_id}/scoring").status_code == 200
-
-        response = client.post(
-            f"/api/applications/{application_id}/confirm", json={"confirmed": True}
+        response = client.patch(
+            f"/api/applications/{application['id']}",
+            json={"requested_amount": 2_000_000, "term_months": 36},
         )
         assert response.status_code == 200
-        assert response.json()["application"]["status"] == "issued"
+        stored = response.json()["application"]
+        assert stored["status"] == "draft"
+        assert stored["requested_amount"] == 2_000_000
+        assert stored["term_months"] == 36
+        assert stored["monthly_payment"] > 0
+        assert stored["total_repayment"] == pytest.approx(
+            stored["monthly_payment"] * 36, rel=1e-3
+        )
 
-    def test_confirm_not_explicit_422(self, client):
+    def test_patch_non_draft_409(self, client):
         application = create_application(client)
-        response = client.post(
-            f"/api/applications/{application['id']}/confirm", json={"confirmed": False}
+        submit_application(client, application["id"])
+        response = client.patch(
+            f"/api/applications/{application['id']}",
+            json={"requested_amount": 2_000_000},
+        )
+        assert response.status_code == 409
+
+    def test_patch_amount_out_of_range_422(self, client):
+        application = create_application(client)
+        response = client.patch(
+            f"/api/applications/{application['id']}",
+            json={"requested_amount": 100_000},
         )
         assert response.status_code == 422
 
-    def test_confirm_before_scoring_409(self, client):
+    def test_patch_missing_application_404(self, client):
+        response = client.patch(
+            "/api/applications/999", json={"requested_amount": 2_000_000}
+        )
+        assert response.status_code == 404
+
+
+class TestOfferResponseEndpoint:
+    def test_accept_offer(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        response = client.post(
+            f"/api/applications/{application['id']}/offer-response",
+            json={"accept": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["application"]["status"] == "accepted"
+
+    def test_decline_offer(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        response = client.post(
+            f"/api/applications/{application['id']}/offer-response",
+            json={"accept": False, "decline_reason": "Дорогой платёж"},
+        )
+        assert response.status_code == 200
+        assert response.json()["application"]["status"] == "client_declined"
+
+        history = client.get(f"/api/applications/{application['id']}/history").json()
+        assert history["history"][-1]["comment"] == "Причина отказа: Дорогой платёж"
+
+    def test_offer_response_wrong_status_409(self, client):
         application = create_application(client)
         response = client.post(
-            f"/api/applications/{application['id']}/confirm", json={"confirmed": True}
+            f"/api/applications/{application['id']}/offer-response",
+            json={"accept": True},
         )
         assert response.status_code == 409
 
-    def test_confirm_rejected_application_409(self, client):
-        profile_id = create_profile(
-            client, monthly_revenue=200_000, monthly_profit=10_000, business_age_months=6
-        )
-        application = create_application(client, profile_id=profile_id)
-        assert client.post(f"/api/applications/{application['id']}/scoring").status_code == 200
+    def test_offer_response_missing_application_404(self, client):
         response = client.post(
-            f"/api/applications/{application['id']}/confirm", json={"confirmed": True}
+            "/api/applications/999/offer-response", json={"accept": True}
         )
+        assert response.status_code == 404
+
+
+class TestSignEndpoint:
+    def test_sign_issues_application(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        client.post(
+            f"/api/applications/{application['id']}/offer-response", json={"accept": True}
+        )
+        response = client.post(f"/api/applications/{application['id']}/sign")
+        assert response.status_code == 200
+        assert response.json()["application"]["status"] == "issued"
+
+    def test_sign_not_accepted_409(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        response = client.post(f"/api/applications/{application['id']}/sign")
         assert response.status_code == 409
 
-    def test_confirm_missing_application_404(self, client):
-        response = client.post("/api/applications/999/confirm", json={"confirmed": True})
+    def test_sign_missing_application_404(self, client):
+        assert client.post("/api/applications/999/sign").status_code == 404
+
+
+class TestHistoryEndpoint:
+    def test_history_full_lifecycle(self, client):
+        application = create_application(client)
+        application_id = application["id"]
+        submit_application(client, application_id)
+        client.post(f"/api/applications/{application_id}/offer-response", json={"accept": True})
+        client.post(f"/api/applications/{application_id}/sign")
+
+        response = client.get(f"/api/applications/{application_id}/history")
+        assert response.status_code == 200
+        history = response.json()["history"]
+        assert [(h["from_status"], h["to_status"]) for h in history] == [
+            ("draft", "submitted"),
+            ("submitted", "data_check"),
+            ("data_check", "scoring"),
+            ("scoring", "approved"),
+            ("approved", "offer_ready"),
+            ("offer_ready", "accepted"),
+            ("accepted", "signed"),
+            ("signed", "issued"),
+        ]
+        actors = [h["actor_type"] for h in history]
+        assert actors == ["client", "system", "system", "system", "system", "client", "client", "system"]
+
+    def test_history_missing_application_404(self, client):
+        assert client.get("/api/applications/999/history").status_code == 404
+
+
+class TestOwnership:
+    """Чужая заявка/профиль — 404 (не раскрываем существование)."""
+
+    def test_foreign_application_404(self, client):
+        application = create_application(client)
+        application_id = application["id"]
+        headers = other_user_headers(client)
+
+        assert client.get(f"/api/applications/{application_id}", headers=headers).status_code == 404
+        assert client.post(f"/api/applications/{application_id}/submit", headers=headers).status_code == 404
+        assert client.post(f"/api/applications/{application_id}/scoring", headers=headers).status_code == 404
+        assert (
+            client.patch(
+                f"/api/applications/{application_id}",
+                json={"requested_amount": 2_000_000},
+                headers=headers,
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                f"/api/applications/{application_id}/offer-response",
+                json={"accept": True},
+                headers=headers,
+            ).status_code
+            == 404
+        )
+        assert client.post(f"/api/applications/{application_id}/sign", headers=headers).status_code == 404
+        assert client.get(f"/api/applications/{application_id}/history", headers=headers).status_code == 404
+
+    def test_foreign_profile_applications_404(self, client):
+        profile_id = create_profile(client)
+        headers = other_user_headers(client)
+        assert (
+            client.get(f"/api/profile/{profile_id}/applications", headers=headers).status_code
+            == 404
+        )
+
+    def test_create_application_for_foreign_profile_404(self, client):
+        headers = other_user_headers(client)
+        foreign_profile_id = client.post(
+            "/api/profile", json=STRONG_PROFILE, headers=headers
+        ).json()["id"]
+        response = client.post(
+            "/api/applications",
+            json={
+                "profile_id": foreign_profile_id,
+                "product_id": 1,
+                "requested_amount": 1_000_000,
+                "term_months": 12,
+            },
+        )
         assert response.status_code == 404
 
 
@@ -246,16 +428,3 @@ class TestGetApplications:
 
     def test_list_applications_missing_profile_404(self, client):
         assert client.get("/api/profile/999/applications").status_code == 404
-
-    def test_create_business_age_below_minimum_422(self, client):
-        profile_id = create_profile(client, business_age_months=3)
-        response = client.post(
-            "/api/applications",
-            json={
-                "profile_id": profile_id,
-                "product_id": 1,
-                "requested_amount": 1_000_000,
-                "term_months": 12,
-            },
-        )
-        assert response.status_code == 422

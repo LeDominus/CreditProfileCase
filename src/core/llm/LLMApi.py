@@ -7,7 +7,7 @@ from openai import OpenAI
 from src.config.llm_config import (
     YANDEX_API_KEY, YANDEX_FOLDER, MODEL_NAME,
     MAX_OUTPUT_TOKENS, TEMPERATURE, BASE_URL, MAX_MESSAGES,
-    REASONING_EFFORT,
+    REASONING_EFFORT, REQUIRED_PROFILE_FIELDS,
 )
 from src.config.prompt import SYSTEM_PROMPT
 
@@ -40,6 +40,7 @@ class LLMApi:
         messages: list,
         profile: dict | None = None,
         system_prompt: str | None = None,
+        require_complete_profile: bool = False,
     ) -> list[dict]:
         """Извлечение контекста диалога для запроса к LLM"""
         if system_prompt is None:
@@ -52,6 +53,19 @@ class LLMApi:
                 system_prompt = (
                     f"{system_prompt}\n\nИзвестные данные профиля бизнеса: {known_fields}."
                 )
+            if require_complete_profile:
+                missing_fields = [
+                    f"{key} ({label})"
+                    for key, label in REQUIRED_PROFILE_FIELDS.items()
+                    if profile.get(key) is None
+                ]
+                if missing_fields:
+                    system_prompt += (
+                        f"\n\nДля отправки заявки пока не хватает данных: "
+                        f"{', '.join(missing_fields)}. Уточни их у пользователя. "
+                        f"Пока хотя бы один обязательный параметр не заполнен — "
+                        f"не завершай диалог."
+                    )
         context = [{"role": "system", "content": system_prompt}]
         history = (
             messages[-MAX_MESSAGES:] if MAX_MESSAGES and MAX_MESSAGES > 0 else messages

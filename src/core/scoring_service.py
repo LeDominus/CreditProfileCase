@@ -1,28 +1,46 @@
-from datetime import datetime, timezone
-from src.core.applications import ApplicationRepository
+from src.config.scoring_config import MANUAL_REVIEW_SCORE_RANGE
+from src.core.applications import (
+    ACTOR_SYSTEM,
+    ApplicationRepository,
+    transition_application,
+)
 from src.core.profile import ProfileRepository
 from src.core.scoring import score_application
 from src.schemas.application_schema import (
+    STATUS_APPROVED,
+    STATUS_APPROVED_WITH_CHANGES,
+    STATUS_DATA_CHECK,
+    STATUS_MANUAL_REVIEW,
     STATUS_NEEDS_INFO,
+    STATUS_OFFER_READY,
     STATUS_SCORING,
     STATUS_SUBMITTED,
     Application,
-    can_transition,
 )
 from src.utils import get_product, profile_to_dict
 from src.exceptions import *
+
+
+PIPELINE_ENTRY_STATUSES = (STATUS_SUBMITTED, STATUS_NEEDS_INFO)
+
 
 def process_application_scoring(
     application_id: int,
     app_rep: ApplicationRepository,
     profile_rep: ProfileRepository,
 ) -> tuple[Application, dict]:
-    """Скоринг заявки: submitted/needs_info -> scoring -> решение"""
-    
+    """Конвейер обработки заявки.
+
+    submitted|needs_info -> data_check -> scoring -> решение -> offer_ready.
+    Все смены статуса идут через transition_application (единая точка)
+    с записью в application_status_history.
+
+    Этап data_check до п. 2.6 — мгновенный проход (заглушка).
+    """
     application = _get_application(app_rep, application_id)
-    if application.status not in (STATUS_SUBMITTED, STATUS_NEEDS_INFO):
+    if application.status not in PIPELINE_ENTRY_STATUSES:
         raise InvalidApplicationStatusError(
-            "Scoring is allowed only for applications in status "
+            "Processing is allowed only for applications in status "
             f"'{STATUS_SUBMITTED}' or '{STATUS_NEEDS_INFO}' "
             f"(current: '{application.status}')"
         )
@@ -34,6 +52,14 @@ def process_application_scoring(
             f"Product with id={application.product_id} not found"
         )
 
+    # Этап 1: проверка полноты данных (до п. 2.6 — мгновенный проход)
+    application = _transition(
+        app_rep, application, STATUS_DATA_CHECK,
+        comment="Проверка данных пройдена",
+    )
+
+    # Этап 2: скоринг
+    application = _transition(app_rep, application, STATUS_SCORING)
     result = score_application(
         profile_to_dict(profile),
         product,
@@ -42,21 +68,61 @@ def process_application_scoring(
         application.monthly_payment,
     )
 
-    for new_status in (STATUS_SCORING, result.decision):
-        if not can_transition(application.status, new_status):
-            raise InvalidApplicationStatusError(
-                f"Transition '{application.status}' -> '{new_status}' is not allowed"
-            )
-        application.status = new_status
-        application.updated_at = datetime.now(timezone.utc)
-        if new_status == result.decision:
-            application.score = result.score
-            application.decision = result.decision
-            application.decision_details = result.to_dict()
-        _update_application(app_rep, application)
+    # Пограничный балл — ручная проверка (триггер-заглушка до п. 2.5)
+    if _in_manual_review_range(result.score):
+        application = _transition(
+            app_rep, application, STATUS_MANUAL_REVIEW,
+            comment=(
+                f"Балл {result.score:g} из 100 — в пограничном интервале, "
+                "заявка передана на ручную проверку"
+            ),
+        )
+        return application, result.to_dict()
 
-    stored = _get_application(app_rep, application_id)
-    return stored, result.to_dict()
+    # Этап 3: решение (score/decision/decision_details сохраняются вместе со статусом)
+    application.score = result.score
+    application.decision = result.decision
+    application.decision_details = result.to_dict()
+    application = _transition(
+        app_rep, application, result.decision,
+        comment=result.to_dict().get("explanation"),
+    )
+
+    # Этап 4: одобрение -> предложение готово к отклику клиента
+    if result.decision in (STATUS_APPROVED, STATUS_APPROVED_WITH_CHANGES):
+        application = _transition(app_rep, application, STATUS_OFFER_READY)
+
+    return application, result.to_dict()
+
+
+def _in_manual_review_range(score: float | None) -> bool:
+    """Балл в пограничном интервале ручной проверки.
+
+    MANUAL_REVIEW_SCORE_RANGE — заглушка до п. 2.5: None выключает триггер.
+    """
+    if MANUAL_REVIEW_SCORE_RANGE is None or score is None:
+        return False
+    low, high = MANUAL_REVIEW_SCORE_RANGE
+    return low <= score < high
+
+
+def _transition(
+    app_rep: ApplicationRepository,
+    application: Application,
+    target_status: str,
+    comment: str | None = None,
+) -> Application:
+    """Смена статуса через единую точку; сбои БД -> ScoringRepositoryError."""
+    try:
+        return transition_application(
+            application, target_status, ACTOR_SYSTEM, None, app_rep, comment=comment
+        )
+    except ScoringError:
+        raise
+    except Exception as e:
+        raise ScoringRepositoryError(
+            f"Failed to transition application to '{target_status}': {e}"
+        ) from e
 
 
 def _get_application(app_rep: ApplicationRepository, application_id: int) -> Application:
@@ -79,15 +145,3 @@ def _get_profile(profile_rep: ProfileRepository, profile_id: int):
     if profile is None:
         raise ProfileNotFoundError(f"Profile with id={profile_id} not found")
     return profile
-
-
-def _update_application(app_rep: ApplicationRepository, application: Application) -> None:
-    try:
-        if app_rep.update_application(application) is None:
-            raise ScoringRepositoryError(
-                f"Failed to update application with id={application.id}"
-            )
-    except ScoringError:
-        raise
-    except Exception as e:
-        raise ScoringRepositoryError(f"Failed to update application: {e}") from e

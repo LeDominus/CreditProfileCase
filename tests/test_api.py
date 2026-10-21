@@ -41,6 +41,16 @@ class TestConversations:
         assert response.status_code == 201
         assert response.json()["conversation_id"] == conversation_id
 
+    def test_send_message_strips_reply_whitespace(self, client):
+        """Ответ ассистента возвращается без ведущих/замыкающих отступов."""
+        client.app.state.llmAPI.chat_answer = "\n\n   Ответ с отступами.   \n\n"
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"role": "user", "content": "Нужен кредит"},
+        )
+        assert response.status_code == 201
+        assert response.json()["reply"] == "Ответ с отступами."
     def test_send_message_to_missing_conversation(self, client):
         response = client.post(
             "/api/conversations/999/messages",

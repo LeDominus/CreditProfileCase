@@ -110,8 +110,18 @@ def _submit_default_application(at):
     return at.session_state["applications"][0]
 
 
-def test_full_path_scoring_confirm_issue():
-    """Консультация -> профиль -> скоринг (approved) -> финальное подтверждение -> выдача."""
+def _send_draft(at):
+    """Отправка черновика кнопкой «Отправить заявку» (демо: локальный скоринг)."""
+    submit = [b for b in at.button if b.key and b.key.startswith("app_submit_")]
+    assert submit, "кнопка «Отправить заявку» должна рендериться для черновика"
+    submit[0].click()
+    at.run()
+    assert not at.exception
+    return at.session_state["applications"][0]
+
+
+def test_full_lifecycle_submit_accept_sign():
+    """Черновик -> отправка -> предложение -> принятие условий -> подписание -> выдача."""
     at = make_app()
     at.session_state["profile"].update(
         {
@@ -122,28 +132,65 @@ def test_full_path_scoring_confirm_issue():
     )
 
     application = _submit_default_application(at)
-    assert application["status"] == "approved"
+    assert application["status"] == "draft"
+    assert application["score"] is None
+    assert any(e.label == "Изменить сумму и срок" for e in at.expander)
+
+    # отправка черновика -> конвейер (демо: локальный скоринг) -> предложение
+    application = _send_draft(at)
+    assert application["status"] == "offer_ready"
     assert application["score"] >= 70
     assert application["decision_details"]["explanation"]
 
-    # финальное подтверждение клиента -> выдача (смоделирована)
-    confirm = [b for b in at.button if b.key and b.key.startswith("app_confirm_")]
-    assert confirm, "кнопка подтверждения решения должна рендериться"
-    confirm[0].click()
+    # принятие условий предложения
+    accept = [b for b in at.button if b.key and b.key.startswith("app_accept_")]
+    assert accept, "кнопка «Принять условия» должна рендериться"
+    accept[0].click()
+    at.run()
+    assert not at.exception
+    assert at.session_state["applications"][0]["status"] == "accepted"
+
+    # подписание договора (ЭП моделируется кнопкой) -> выдача
+    sign = [b for b in at.button if b.key and b.key.startswith("app_sign_")]
+    assert sign, "кнопка «Подписать договор» должна рендериться"
+    sign[0].click()
     at.run()
     assert not at.exception
     assert at.session_state["applications"][0]["status"] == "issued"
 
 
+def test_decline_offer():
+    """Предложение -> отказ клиента -> client_declined (терминальный статус)."""
+    at = make_app()
+    at.session_state["profile"].update(
+        {
+            "business_age_months": 36,
+            "monthly_revenue": 800_000,
+            "monthly_profit": 150_000,
+        }
+    )
+    _submit_default_application(at)
+    _send_draft(at)
+
+    decline = [b for b in at.button if b.key and b.key.startswith("app_decline_")]
+    assert decline, "кнопка «Отклонить предложение» должна рендериться"
+    decline[0].click()
+    at.run()
+    assert not at.exception
+    assert at.session_state["applications"][0]["status"] == "client_declined"
+
+
 def test_needs_info_then_rescore():
-    """Профиль без финансовых данных -> needs_info -> уточнение -> повторный скоринг."""
+    """Профиль без финансовых данных -> needs_info -> уточнение -> повторная обработка."""
     at = make_app()
 
     application = _submit_default_application(at)
+    assert application["status"] == "draft"
+    application = _send_draft(at)
     assert application["status"] == "needs_info"
     assert "monthly_revenue" in application["decision_details"]["missing_fields"]
 
-    # клиент уточняет данные в профиле и отправляет заявку на повторный скоринг
+    # клиент уточняет данные в профиле и отправляет заявку на повторную обработку
     at.session_state["profile"].update(
         {
             "business_age_months": 36,
@@ -152,8 +199,8 @@ def test_needs_info_then_rescore():
         }
     )
     rescore = [b for b in at.button if b.key and b.key.startswith("app_rescore_")]
-    assert rescore, "кнопка повторного скоринга должна рендериться"
+    assert rescore, "кнопка повторной обработки должна рендериться"
     rescore[0].click()
     at.run()
     assert not at.exception
-    assert at.session_state["applications"][0]["status"] == "approved"
+    assert at.session_state["applications"][0]["status"] == "offer_ready"

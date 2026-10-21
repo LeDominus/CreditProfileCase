@@ -7,7 +7,12 @@ from fastapi import Depends, FastAPI, HTTPException, Header, status
 from src.core.llm.extract_pipeline import extract_content
 from src.config.products import PRODUCTS
 from src.core.llm.LLMApi import LLMApi
-from src.core.applications import ApplicationRepository
+from src.core.applications import (
+    ACTOR_CLIENT,
+    ACTOR_SYSTEM,
+    ApplicationRepository,
+    transition_application,
+)
 from src.core.auth.auth import (
     AuthRepository,
     InvalidCredentialsError,
@@ -43,13 +48,16 @@ from src.database.database import DatabaseConnector
 from src.database.migrations import apply_migrations
 from src.schemas.llm_schema import ContractExtraction
 from src.schemas.application_schema import (
-    STATUS_APPROVED,
-    STATUS_APPROVED_WITH_CHANGES,
+    STATUS_ACCEPTED,
+    STATUS_CLIENT_DECLINED,
+    STATUS_DRAFT,
     STATUS_ISSUED,
+    STATUS_SIGNED,
     STATUS_SUBMITTED,
     Application,
-    ApplicationConfirmRequest,
     ApplicationCreateRequest,
+    ApplicationOfferResponseRequest,
+    ApplicationUpdateRequest,
 )
 from src.schemas.auth_schema import AuthLoginRequest, AuthRegisterRequest, User
 from src.schemas.conversation_schema import (
@@ -66,6 +74,7 @@ from src.schemas.profile_schema import (
 )
 from src.config.sql_queries import (
     CREATE_APPLICATIONS_TABLE,
+    CREATE_APPLICATION_STATUS_HISTORY_TABLE,
     CREATE_AUTH_TOKENS_TABLE,
     CREATE_BUSINESS_PROFILES_TABLE,
     CREATE_CONVERSATIONS_TABLE,
@@ -75,10 +84,9 @@ from src.config.sql_queries import (
 from src.utils import (
     profile_to_dict, get_product,
     application_response,
-    get_application_or_404,
+    get_owned_application_or_404,
     get_owned_conversation_or_404,
     get_owned_profile_or_404,
-    get_profile_or_404,
 )
 
 logging.basicConfig(
@@ -100,9 +108,9 @@ async def lifespan(app):
             conn.load_data(CREATE_MESSAGES_TABLE)
             conn.load_data(CREATE_BUSINESS_PROFILES_TABLE)
             conn.load_data(CREATE_APPLICATIONS_TABLE)
+            conn.load_data(CREATE_APPLICATION_STATUS_HISTORY_TABLE)
             conn.load_data(CREATE_USERS_TABLE)
             conn.load_data(CREATE_AUTH_TOKENS_TABLE)
-            # новые колонки в уже существующих таблицах (идемпотентно)
             apply_migrations(conn)
     except Exception as e:
         raise RuntimeError(f"[app] Ошибка при создании таблиц: {e}") from e
@@ -378,11 +386,12 @@ def calc_payment_for_profile(
 @app.post("/api/applications", status_code=status.HTTP_201_CREATED)
 def create_application(
     payload: ApplicationCreateRequest,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository),
     app_rep: ApplicationRepository = Depends(load_application_repository),
 ) -> dict:
-    """Создание заявки: валидация профиля/продукта + аннуитетный расчёт"""
-    profile = get_profile_or_404(profile_rep, payload.profile_id)
+    """Создание черновика заявки: валидация профиля/продукта + аннуитетный расчёт"""
+    profile = get_owned_profile_or_404(profile_rep, payload.profile_id, user.id)
 
     product = get_product(payload.product_id)
     if product is None:
@@ -434,7 +443,7 @@ def create_application(
         monthly_payment=monthly_payment,
         total_repayment=total_repayment,
         overpayment=overpayment,
-        status=STATUS_SUBMITTED,
+        status=STATUS_DRAFT,
     )
     try:
         application_id = app_rep.create_application(application)
@@ -448,10 +457,12 @@ def create_application(
 @app.post("/api/applications/{application_id}/scoring")
 def run_application_scoring(
     application_id: int,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository),
     app_rep: ApplicationRepository = Depends(load_application_repository),
 ) -> dict:
-    """Скоринг заявки: submitted/needs_info -> scoring -> решение."""
+    """Повторная обработка заявки: submitted|needs_info -> конвейер скоринга."""
+    get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
     try:
         application, scoring = process_application_scoring(application_id, app_rep, profile_rep)
     except ApplicationNotFoundError as e:
@@ -471,32 +482,93 @@ def run_application_scoring(
     }
 
 
-@app.post("/api/applications/{application_id}/confirm")
-def confirm_application(
+@app.post("/api/applications/{application_id}/submit")
+def submit_application(
     application_id: int,
-    payload: ApplicationConfirmRequest,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
     app_rep: ApplicationRepository = Depends(load_application_repository),
 ) -> dict:
-    """Финальное подтверждение клиента: approved* -> issued (выдача смоделирована)."""
-    application = get_application_or_404(app_rep, application_id)
-    if not payload.confirmed:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Confirmation must be explicit (confirmed=true)",
-        )
-    if application.status not in (STATUS_APPROVED, STATUS_APPROVED_WITH_CHANGES):
+    """Отправка заявки на обработку: draft -> submitted + автозапуск конвейера."""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    try:
+        transition_application(application, STATUS_SUBMITTED, ACTOR_CLIENT, user.id, app_rep)
+        application, scoring = process_application_scoring(application_id, app_rep, profile_rep)
+    except ApplicationNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ProductNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ScoringError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "success",
+        "application": application_response(application),
+        "scoring": scoring,
+    }
+
+
+@app.patch("/api/applications/{application_id}")
+def update_application(
+    application_id: int,
+    payload: ApplicationUpdateRequest,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Редактирование черновика заявки: сумма/срок с пересчётом аннуитета."""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    if application.status != STATUS_DRAFT:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only draft applications can be edited (current: '{application.status}')",
+        )
+
+    product = get_product(application.product_id)
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with id={application.product_id} not found",
+        )
+
+    amount = (
+        float(payload.requested_amount)
+        if payload.requested_amount is not None
+        else application.requested_amount
+    )
+    term = payload.term_months if payload.term_months is not None else application.term_months
+    if not product["min_amount"] <= amount <= product["max_amount"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "Only approved applications can be confirmed "
-                f"(current: '{application.status}')"
+                f"Requested amount must be between {product['min_amount']} and "
+                f"{product['max_amount']} for product '{product['name']}'"
+            ),
+        )
+    if not product["min_term"] <= term <= product["max_term"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Term must be between {product['min_term']} and {product['max_term']} "
+                f"months for product '{product['name']}'"
             ),
         )
 
-    application.status = STATUS_ISSUED
+    monthly_payment = calculate_annuity_payment(amount, float(product["rate"]), term)
+    total_repayment = round(monthly_payment * term, 4)
+    overpayment = round(total_repayment - amount, 4)
+
+    application.requested_amount = amount
+    application.term_months = term
+    application.monthly_payment = monthly_payment
+    application.total_repayment = total_repayment
+    application.overpayment = overpayment
     application.updated_at = datetime.now(timezone.utc)
     try:
-        if app_rep.update_application(application) is None:
+        if app_rep.update_application_details(application) is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update application with id={application_id}",
@@ -510,24 +582,89 @@ def confirm_application(
     return {"status": "success", "application": application_response(stored)}
 
 
+@app.post("/api/applications/{application_id}/offer-response")
+def respond_to_offer(
+    application_id: int,
+    payload: ApplicationOfferResponseRequest,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Отклик клиента на предложение: offer_ready -> accepted | client_declined."""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    target_status = STATUS_ACCEPTED if payload.accept else STATUS_CLIENT_DECLINED
+    comment = f"Причина отказа: {payload.decline_reason}" if (
+        not payload.accept and payload.decline_reason
+    ) else None
+    try:
+        application = transition_application(
+            application, target_status, ACTOR_CLIENT, user.id, app_rep, comment=comment
+        )
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"status": "success", "application": application_response(application)}
+
+
+@app.post("/api/applications/{application_id}/sign")
+def sign_application(
+    application_id: int,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Подписание договора (ЭП моделируется кнопкой): accepted -> signed -> issued."""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    try:
+        application = transition_application(
+            application, STATUS_SIGNED, ACTOR_CLIENT, user.id, app_rep,
+            comment="Договор подписан (ЭП)",
+        )
+        application = transition_application(
+            application, STATUS_ISSUED, ACTOR_SYSTEM, None, app_rep,
+            comment="Договор подписан, выдача исполнена",
+        )
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"status": "success", "application": application_response(application)}
+
+
+@app.get("/api/applications/{application_id}/history")
+def get_application_history(
+    application_id: int,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """История смены статуса заявки, от ранней записи к поздней."""
+    get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
+    try:
+        history = app_rep.get_status_history(application_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+    return {"status": "success", "application_id": application_id, "history": history}
+
+
 @app.get("/api/applications/{application_id}")
 def get_application(
     application_id: int,
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
     app_rep: ApplicationRepository = Depends(load_application_repository),
 ) -> dict:
-    """Заявка по id со статусом и результатом скоринга."""
-    application = get_application_or_404(app_rep, application_id)
+    """Заявка пользователя по id со статусом и результатом скоринга."""
+    application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
     return {"status": "success", "application": application_response(application)}
 
 
 @app.get("/api/profile/{profile_id}/applications")
 def get_profile_applications(
     profile_id: int,
+    user: User = Depends(get_current_user),
     profile_rep: ProfileRepository = Depends(load_profile_repository),
     app_rep: ApplicationRepository = Depends(load_application_repository),
 ) -> dict:
-    """Все заявки профиля, новые сверху."""
-    get_profile_or_404(profile_rep, profile_id)
+    """Все заявки профиля пользователя, новые сверху."""
+    get_owned_profile_or_404(profile_rep, profile_id, user.id)
     try:
         applications = app_rep.get_applications_by_profile(profile_id)
     except Exception as e:

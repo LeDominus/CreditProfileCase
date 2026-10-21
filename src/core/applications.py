@@ -1,13 +1,22 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
 from src.config.sql_queries import (
     CREATE_APPLICATION_QUERY,
+    CREATE_APPLICATION_STATUS_HISTORY_QUERY,
     GET_APPLICATION_QUERY,
+    GET_APPLICATION_STATUS_HISTORY_QUERY,
     GET_PROFILE_APPLICATIONS_QUERY,
+    UPDATE_APPLICATION_DETAILS_QUERY,
     UPDATE_APPLICATION_QUERY,
 )
 from src.database.database import DatabaseConnector
-from src.schemas.application_schema import Application
+from src.exceptions import ApplicationNotFoundError, InvalidApplicationStatusError
+from src.schemas.application_schema import Application, can_transition
+
+
+ACTOR_SYSTEM = "system"
+ACTOR_CLIENT = "client"
 
 
 class ApplicationRepository:
@@ -75,6 +84,71 @@ class ApplicationRepository:
             )
         return application.id
 
+    def update_application_details(self, application: Application) -> int | None:
+        """Обновление параметров заявки (сумма/срок/платежи) без смены статуса."""
+        if application.id is None or self.get_application(application.id) is None:
+            return None
+        with self.dbConn as conn:
+            conn.load_data(
+                sqlQuery=UPDATE_APPLICATION_DETAILS_QUERY,
+                parameters={
+                    "requested_amount": application.requested_amount,
+                    "term_months": application.term_months,
+                    "monthly_payment": application.monthly_payment,
+                    "total_repayment": application.total_repayment,
+                    "overpayment": application.overpayment,
+                    "updated_at": application.updated_at.isoformat(),
+                    "id": application.id,
+                },
+            )
+        return application.id
+
+    def add_status_history(
+        self,
+        application_id: int,
+        from_status: str,
+        to_status: str,
+        actor_type: str,
+        actor_id: int | None,
+        comment: str | None,
+        created_at: datetime,
+    ) -> int:
+        """Запись о смене статуса в историю заявок."""
+        with self.dbConn as conn:
+            return conn.load_data(
+                sqlQuery=CREATE_APPLICATION_STATUS_HISTORY_QUERY,
+                parameters={
+                    "application_id": application_id,
+                    "from_status": from_status,
+                    "to_status": to_status,
+                    "actor_type": actor_type,
+                    "actor_id": actor_id,
+                    "comment": comment,
+                    "created_at": created_at.isoformat(),
+                },
+            )
+
+    def get_status_history(self, application_id: int) -> list[dict]:
+        """История смены статуса заявки, от ранней записи к поздней."""
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_APPLICATION_STATUS_HISTORY_QUERY,
+                parameters={"application_id": application_id},
+            )
+        return [
+            {
+                "id": row["id"],
+                "application_id": row["application_id"],
+                "from_status": row["from_status"],
+                "to_status": row["to_status"],
+                "actor_type": row["actor_type"],
+                "actor_id": row["actor_id"],
+                "comment": row["comment"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _dump_details(decision_details: dict | None) -> str | None:
         if decision_details is None:
@@ -100,3 +174,39 @@ class ApplicationRepository:
             decision_details=json.loads(row["decision_details"]) if row["decision_details"] else None,
             id=row["id"],
         )
+
+def transition_application(
+    application: Application,
+    target_status: str,
+    actor_type: str,
+    actor_id: int | None,
+    app_rep: ApplicationRepository,
+    comment: str | None = None,
+) -> Application:
+    """Единая точка смены статуса заявки.
+
+    Проверяет переход по матрице ALLOWED_TRANSITIONS, обновляет статус и
+    updated_at, сохраняет заявку и пишет запись в application_status_history.
+    Скоринговые поля (score/decision/decision_details) вызывающий код задаёт
+    на объекте заявки до вызова — они сохраняются тем же UPDATE-запросом.
+    Возвращает заявку, перечитанную из БД.
+    """
+    if not can_transition(application.status, target_status):
+        raise InvalidApplicationStatusError(
+            f"Недопустимый переход статуса: {application.status!r} -> {target_status!r}"
+        )
+    from_status = application.status
+    application.status = target_status
+    application.updated_at = datetime.now(timezone.utc)
+    if app_rep.update_application(application) is None:
+        raise ApplicationNotFoundError(f"Заявка id={application.id} не найдена")
+    app_rep.add_status_history(
+        application_id=application.id,
+        from_status=from_status,
+        to_status=target_status,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        comment=comment,
+        created_at=application.updated_at,
+    )
+    return app_rep.get_application(application.id)

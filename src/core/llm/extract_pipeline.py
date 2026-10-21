@@ -38,13 +38,17 @@ def extract_content(
 
     profile_dict = profile_to_dict(profile) if profile is not None else None
     history = conv_rep.get_conversation_messages(conversation_id)
-    context = llm.extract_context(messages=history, profile=profile_dict)
+    context = llm.extract_context(
+        messages=history, profile=profile_dict, require_complete_profile=True
+    )
     try:
         reply = run_with_tools(llm, context)
     except Exception:
         reply = ""
     if not reply or not reply.strip():
         reply = FALLBACK_REPLY
+    else:
+        reply = reply.strip()
     assistant_message = Message(
         conversation_id=conversation_id,
         role="assistant",

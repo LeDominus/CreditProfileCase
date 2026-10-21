@@ -7,6 +7,7 @@ import pytest
 
 from src.config.sql_queries import (
     CREATE_APPLICATIONS_TABLE,
+    CREATE_APPLICATION_STATUS_HISTORY_TABLE,
     CREATE_AUTH_TOKENS_TABLE,
     CREATE_BUSINESS_PROFILES_TABLE,
     CREATE_CONVERSATIONS_TABLE,
@@ -30,6 +31,7 @@ def temp_db(tmp_path):
         conn.load_data(CREATE_MESSAGES_TABLE)
         conn.load_data(CREATE_BUSINESS_PROFILES_TABLE)
         conn.load_data(CREATE_APPLICATIONS_TABLE)
+        conn.load_data(CREATE_APPLICATION_STATUS_HISTORY_TABLE)
         conn.load_data(CREATE_USERS_TABLE)
         conn.load_data(CREATE_AUTH_TOKENS_TABLE)
     return db

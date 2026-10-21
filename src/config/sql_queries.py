@@ -141,6 +141,45 @@ UPDATE_APPLICATION_QUERY = """
     WHERE id = :id
 """
 
+UPDATE_APPLICATION_DETAILS_QUERY = """
+    UPDATE applications
+    SET requested_amount = :requested_amount,
+        term_months = :term_months,
+        monthly_payment = :monthly_payment,
+        total_repayment = :total_repayment,
+        overpayment = :overpayment,
+        updated_at = :updated_at
+    WHERE id = :id
+"""
+
+CREATE_APPLICATION_STATUS_HISTORY_TABLE = """
+    CREATE TABLE IF NOT EXISTS application_status_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        actor_type TEXT NOT NULL,
+        actor_id INTEGER,
+        comment TEXT,
+        created_at TEXT NOT NULL
+    )
+"""
+
+CREATE_APPLICATION_STATUS_HISTORY_QUERY = """
+    INSERT INTO application_status_history (
+        application_id, from_status, to_status, actor_type, actor_id, comment, created_at
+    ) VALUES (
+        :application_id, :from_status, :to_status, :actor_type, :actor_id, :comment, :created_at
+    )
+"""
+
+GET_APPLICATION_STATUS_HISTORY_QUERY = """
+    SELECT id, application_id, from_status, to_status, actor_type, actor_id, comment, created_at
+    FROM application_status_history
+    WHERE application_id = :application_id
+    ORDER BY id
+"""
+
 CREATE_APPLICATIONS_TABLE = """
     CREATE TABLE IF NOT EXISTS applications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

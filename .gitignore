@@ -7,3 +7,4 @@ docs/
 *.db
 .env
 .pytest_cache/
+*.log

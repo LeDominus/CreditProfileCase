@@ -21,6 +21,14 @@ PROFILE_FIELDS: dict[str, type] = {
     "max_monthly_payment": float,
 }
 
+# оля профиля, обязательные для отправки заявки: ассистент уточняет их в диалоге,
+# пока все не заполнены — диалог не завершается
+REQUIRED_PROFILE_FIELDS: dict[str, str] = {
+    "business_age_months": "срок работы бизнеса в месяцах",
+    "monthly_revenue": "выручка в месяц, руб.",
+    "monthly_profit": "прибыль в месяц, руб.",
+}
+
 
 def _env_float(name: str, default: float) -> float:
     """Числовая переменная окружения с дефолтом"""

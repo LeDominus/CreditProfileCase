@@ -1,6 +1,10 @@
 """Unit-тесты: извлечение контекста и структурированных полей профиля."""
 
-from src.core.llm.utils import extract_profile_fields, parse_profile_fields
+from src.core.llm.utils import (
+    EXTRACTION_TEMPERATURE,
+    extract_profile_fields,
+    parse_profile_fields,
+)
 from src.schemas.conversation_schema import Message
 
 
@@ -56,6 +60,42 @@ class TestExtractContext:
         assert len(ctx) == 3
         assert ctx[1]["role"] == "user"  # tool -> user
         assert ctx[2]["content"] == "вопрос"
+    def test_required_fields_hint_when_profile_incomplete(self, stub_llm):
+        ctx = stub_llm.extract_context(
+            messages=[{"role": "user", "content": "hi"}],
+            profile={
+                "industry": "IT",
+                "business_age_months": 36,
+                "monthly_revenue": None,
+                "monthly_profit": None,
+            },
+            require_complete_profile=True,
+        )
+        prompt = ctx[0]["content"]
+        assert "пока не хватает данных" in prompt
+        assert "monthly_revenue (выручка в месяц" in prompt
+        assert "monthly_profit (прибыль в месяц" in prompt
+        assert "business_age_months (" not in prompt  # заполненное поле не в списке
+        assert "не завершай диалог" in prompt
+
+    def test_no_hint_when_required_fields_complete(self, stub_llm):
+        ctx = stub_llm.extract_context(
+            messages=[{"role": "user", "content": "hi"}],
+            profile={
+                "business_age_months": 36,
+                "monthly_revenue": 800000.0,
+                "monthly_profit": 150000.0,
+            },
+            require_complete_profile=True,
+        )
+        assert "пока не хватает данных" not in ctx[0]["content"]
+
+    def test_no_hint_without_flag(self, stub_llm):
+        ctx = stub_llm.extract_context(
+            messages=[{"role": "user", "content": "hi"}],
+            profile={"industry": "IT"},
+        )
+        assert "пока не хватает данных" not in ctx[0]["content"]
 
 
 class TestParseProfileFields:
@@ -106,11 +146,11 @@ class TestExtractProfileFields:
         assert ctx[-1] == {"role": "user", "content": "нужно 2 млн на 24 месяца"}
 
     def test_extraction_disables_reasoning(self, stub_llm):
-        """Извлечение полей не требует рассуждений — reasoning_effort='none'."""
+        """Извлечение полей: reasoning_effort='none', температура фиксированная."""
         stub_llm.answer = '{"industry": "общепит"}'
         extract_profile_fields("работаю в общепите", stub_llm)
         assert stub_llm.kwargs[0]["reasoning_effort"] == "none"
-        assert stub_llm.kwargs[0]["temperature"] == 0.0
+        assert stub_llm.kwargs[0]["temperature"] == EXTRACTION_TEMPERATURE
 
     def test_empty_message(self, stub_llm):
         assert extract_profile_fields("   ", stub_llm) == {}

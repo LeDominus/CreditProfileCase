@@ -2,10 +2,14 @@ import json
 import logging
 import re
 from src.config.prompt import PROFILE_EXTRACTION_PROMPT
-from src.config.llm_config import PROFILE_FIELDS, TEMPERATURE
+from src.config.llm_config import PROFILE_FIELDS
 from src.core.llm.LLMApi import LLMApi
 
 logger = logging.getLogger(__name__)
+
+# Температура извлечения полей: 0.15 — при 0.0 ответы слишком сухие
+# (не зависит от env TEMPERATURE, чтобы поведение было детерминированным)
+EXTRACTION_TEMPERATURE = 0.15
 
 
 def extract_profile_fields(
@@ -24,7 +28,7 @@ def extract_profile_fields(
     logger.info("Извлечение полей профиля: отправка запроса к LLM…")
     try:
         raw_answer = llm.complete(
-            context, temperature=TEMPERATURE, reasoning_effort="none"
+            context, temperature=EXTRACTION_TEMPERATURE, reasoning_effort="none"
         )
     except Exception as exc:
         logger.warning("Извлечение полей профиля: LLM недоступна (%s)", exc)

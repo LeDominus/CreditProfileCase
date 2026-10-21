@@ -1,4 +1,4 @@
-﻿"""Юнит-тесты сервиса скоринга: process_application_scoring без HTTP-слоя."""
+"""Юнит-тесты конвейера обработки заявки: process_application_scoring без HTTP-слоя."""
 
 import pytest
 
@@ -10,12 +10,17 @@ from src.core.scoring_service import (
 )
 from src.schemas.application_schema import (
     STATUS_APPROVED,
+    STATUS_DATA_CHECK,
     STATUS_ISSUED,
+    STATUS_MANUAL_REVIEW,
     STATUS_NEEDS_INFO,
+    STATUS_OFFER_READY,
+    STATUS_SCORING,
     STATUS_SUBMITTED,
     Application,
 )
 from src.schemas.profile_schema import BusinessProfile
+from src.schemas.scoring_schema import ScoringResult
 
 
 def make_profile(**overrides):
@@ -64,7 +69,7 @@ class TestHappyPath:
             application_id, app_repo, profile_repo
         )
         assert application.id == application_id
-        assert application.status == STATUS_APPROVED
+        assert application.status == STATUS_OFFER_READY
         assert application.score == scoring["score"]
         assert application.decision == scoring["decision"]
         assert application.decision_details == scoring
@@ -72,9 +77,21 @@ class TestHappyPath:
     def test_persists_result(self, app_repo, profile_repo, application_id):
         _, scoring = process_application_scoring(application_id, app_repo, profile_repo)
         stored = app_repo.get_application(application_id)
-        assert stored.status == STATUS_APPROVED
+        assert stored.status == STATUS_OFFER_READY
         assert stored.score == scoring["score"]
         assert stored.decision_details == scoring
+
+    def test_writes_status_history(self, app_repo, profile_repo, application_id):
+        process_application_scoring(application_id, app_repo, profile_repo)
+        history = app_repo.get_status_history(application_id)
+        assert [(h["from_status"], h["to_status"]) for h in history] == [
+            (STATUS_SUBMITTED, STATUS_DATA_CHECK),
+            (STATUS_DATA_CHECK, STATUS_SCORING),
+            (STATUS_SCORING, STATUS_APPROVED),
+            (STATUS_APPROVED, STATUS_OFFER_READY),
+        ]
+        assert all(h["actor_type"] == "system" for h in history)
+        assert all(h["actor_id"] is None for h in history)
 
     def test_needs_info_can_be_rescored(self, app_repo, profile_repo, temp_db):
         # профиль без финансовых полей -> needs_info
@@ -84,15 +101,52 @@ class TestHappyPath:
         aid = app_repo.create_application(make_application(pid))
         _, first = process_application_scoring(aid, app_repo, profile_repo)
         assert first["decision"] == STATUS_NEEDS_INFO
+        assert app_repo.get_application(aid).status == STATUS_NEEDS_INFO
 
-        # уточнили данные -> повторный скоринг даёт решение
+        # уточнили данные -> повторная обработка даёт решение и предложение
         profile = profile_repo.get_profile(pid)
         profile.monthly_revenue = 800_000
         profile.monthly_profit = 150_000
         profile_repo.update_profile(profile)
         application, second = process_application_scoring(aid, app_repo, profile_repo)
-        assert application.status == STATUS_APPROVED
+        assert application.status == STATUS_OFFER_READY
         assert second["decision"] == STATUS_APPROVED
+
+
+class TestManualReviewTrigger:
+    """Триггер ручной проверки: интервал-заглушка MANUAL_REVIEW_SCORE_RANGE (до п. 2.5)."""
+
+    @staticmethod
+    def _fix_score(monkeypatch, score):
+        monkeypatch.setattr(
+            "src.core.scoring_service.MANUAL_REVIEW_SCORE_RANGE", (50.0, 70.0)
+        )
+        monkeypatch.setattr(
+            "src.core.scoring_service.score_application",
+            lambda *args, **kwargs: ScoringResult(
+                score=score, decision=STATUS_APPROVED, explanation="stub"
+            ),
+        )
+
+    def test_border_score_goes_to_manual_review(
+        self, app_repo, profile_repo, application_id, monkeypatch
+    ):
+        self._fix_score(monkeypatch, 60.0)
+        application, scoring = process_application_scoring(
+            application_id, app_repo, profile_repo
+        )
+        assert application.status == STATUS_MANUAL_REVIEW
+        assert scoring["score"] == 60.0
+        history = app_repo.get_status_history(application_id)
+        assert history[-1]["to_status"] == STATUS_MANUAL_REVIEW
+        assert "ручную проверку" in history[-1]["comment"]
+
+    def test_high_score_skips_manual_review(
+        self, app_repo, profile_repo, application_id, monkeypatch
+    ):
+        self._fix_score(monkeypatch, 80.0)
+        application, _ = process_application_scoring(application_id, app_repo, profile_repo)
+        assert application.status == STATUS_OFFER_READY
 
 
 class TestErrors:

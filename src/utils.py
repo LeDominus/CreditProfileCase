@@ -54,6 +54,26 @@ def get_application_or_404(app_rep: ApplicationRepository, application_id: int) 
     return application
 
 
+def get_owned_application_or_404(
+    app_rep: ApplicationRepository,
+    profile_rep: ProfileRepository,
+    application_id: int,
+    user_id: int,
+) -> Application:
+    """Заявка пользователя; 404 — если не найдена или принадлежит другому (не раскрываем существование)."""
+    application = get_application_or_404(app_rep, application_id)
+    try:
+        profile = profile_rep.get_profile(application.profile_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
+    if profile is None or profile.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Application with id={application_id} not found",
+        )
+    return application
+
+
 def get_profile_or_404(profile_rep: ProfileRepository, profile_id: int) -> BusinessProfile:
     try:
         profile = profile_rep.get_profile(profile_id)
