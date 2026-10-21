@@ -57,17 +57,19 @@ jobs:
             REPO="https://github.com/LeDominus/CreditProfileCase.git"
             BACKEND_PORT="${BACKEND_PORT:-5555}"
 
-            # 1. Код: первый запуск — clone, дальше — жёсткая синхронизация с origin/master.
-            #    reset --hard не трогает untracked-файлы (.env, data/) — секреты и БД остаются на месте.
-            if [ ! -d "$PROJECT_DIR/.git" ]; then
-              echo "First deploy: cloning repository..."
-              git clone "$REPO" "$PROJECT_DIR"
-            else
-              cd "$PROJECT_DIR"
-              git fetch origin master
-              git reset --hard origin/master
-            fi
+            # 1. Код: первый запуск — init+fetch в существующей папке (там может
+            #    уже лежать .env), дальше — жёсткая синхронизация с origin/master.
+            #    reset --hard не трогает untracked-файлы (.env, data/) — секреты
+            #    и БД остаются на месте.
+            mkdir -p "$PROJECT_DIR"
             cd "$PROJECT_DIR"
+            if [ ! -d .git ]; then
+              echo "First deploy: initializing repository..."
+              git init -q
+              git remote add origin "$REPO" 2>/dev/null || git remote set-url origin "$REPO"
+            fi
+            git fetch origin master
+            git reset --hard origin/master
 
             # 2. .env обязателен (в репо его нет — создаётся на VPS один раз вручную).
             if [ ! -f .env ]; then
