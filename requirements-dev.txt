@@ -1,0 +1,5 @@
+# Зависимости для разработки и CI: pytest (тесты), ruff (линт).
+# Прод-образы (Dockerfile) ставят только requirements.txt.
+-r requirements.txt
+pytest>=8.0
+ruff>=0.6
