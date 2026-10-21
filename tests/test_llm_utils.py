@@ -119,6 +119,33 @@ class TestParseProfileFields:
             "business_age_months": 36
         }
 
+    def test_duration_string_years_converted_to_months(self):
+        # LLM вернула срок строкой в годах — парсер переводит в месяцы
+        assert parse_profile_fields('{"business_age_months": "2 года"}') == {
+            "business_age_months": 24
+        }
+
+    def test_duration_fractional_years(self):
+        assert parse_profile_fields('{"business_age_months": "полтора года"}') == {
+            "business_age_months": 18
+        }
+        assert parse_profile_fields('{"business_age_months": "1,5 года"}') == {
+            "business_age_months": 18
+        }
+
+    def test_duration_years_and_months_combined(self):
+        assert parse_profile_fields('{"business_age_months": "1 год 6 месяцев"}') == {
+            "business_age_months": 18
+        }
+
+    def test_duration_months_string(self):
+        assert parse_profile_fields('{"preferred_term_months": "18 мес"}') == {
+            "preferred_term_months": 18
+        }
+
+    def test_unparseable_duration_dropped(self):
+        assert parse_profile_fields('{"business_age_months": "молодой бизнес"}') == {}
+
     def test_unknown_and_invalid_fields_dropped(self):
         assert parse_profile_fields(
             '{"unknown_field": 1, "requested_amount": "abc", "industry": null}'

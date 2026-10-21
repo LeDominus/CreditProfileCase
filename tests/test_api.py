@@ -210,6 +210,8 @@ class TestMessagesPipeline:
                 "funding_purpose": "Пополнение оборотных средств",
                 "requested_amount": 1_500_000,
                 "business_age_months": 24,
+                "monthly_revenue": 2_000_000,
+                "monthly_profit": 300_000,
                 "preferred_term_months": 24,
             },
         ).json()["id"]
@@ -242,6 +244,32 @@ class TestMessagesPipeline:
         assert first["purpose_match"] is True  # «Оборотный капитал» по цели
         assert first["monthly_payment"] > 0
         assert first["overpayment"] > 0
+
+    def test_no_recommendations_until_required_fields_complete(self, client):
+        """Подбор закрыт, пока ассистент не собрал обязательные параметры бизнеса."""
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        profile_id = client.post(
+            "/api/profile",
+            json={
+                "industry": "общепит",
+                "funding_purpose": "Пополнение оборотных средств",
+                "requested_amount": 1_500_000,
+                "business_age_months": 24,
+                "preferred_term_months": 24,
+            },
+        ).json()["id"]
+
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={
+                "role": "user",
+                "content": "Нужно 2 миллиона на 18 месяцев",
+                "profile_id": profile_id,
+            },
+        )
+        assert response.status_code == 201
+        # выручка и прибыль ещё не названы — рекомендаций быть не должно
+        assert response.json()["recommendations"] == []
 
     def test_message_with_missing_profile_404(self, client):
         conversation_id = client.post("/api/conversations", json={}).json()["id"]

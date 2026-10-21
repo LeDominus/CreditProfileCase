@@ -248,6 +248,17 @@ ROLE_LABELS = {
     "bank_analyst": "Кредитный аналитик (андеррайтер)",
 }
 
+# Роли банковской стороны: им видны служебные блоки заявки («Разбор решения»,
+# «История статусов»). Предпринимателю (client) достаточно понятного
+# объяснения — кнопка «Объяснить решение (ИИ)» после обработки заявки.
+BANK_ROLES = ("bank_manager", "bank_analyst")
+
+
+def is_bank_user() -> bool:
+    """Текущий пользователь — сотрудник банка (не предприниматель)."""
+    role = (st.session_state.auth_user or {}).get("role")
+    return role in BANK_ROLES
+
 
 def render_login_page():
     """Страница авторизации: вкладки «Вход» и «Регистрация».
@@ -1236,7 +1247,13 @@ with chat_col:
             )
         st.session_state.awaiting_reply = False
         st.rerun()
-    if st.button("✦  Подобрать продукты", key="chat_recommend", use_container_width=True, type="primary"):
+    # Кнопка подбора появляется ровно тогда, когда ассистент собрал все
+    # обязательные данные профиля — до этого подбор недоступен «в обход» диалога
+    profile_ready = all(
+        st.session_state.profile.get(key) is not None
+        for key in REQUIRED_PROFILE_FIELDS
+    )
+    if profile_ready and st.button("✦  Подобрать продукты", key="chat_recommend", use_container_width=True, type="primary"):
         with st.spinner("Подбираем продукты…"):
             get_recommendations()
         # Выбор продукта открывается только после явного подбора
@@ -1250,7 +1267,7 @@ with product_col:
         # Выбор продукта открывается только после подбора в чате
         st.markdown(
             '<div class="panel"><div class="panel-title">Кредитные продукты</div>'
-            '<div class="panel-sub">Опишите потребность бизнеса в чате и нажмите «Подобрать продукты» — здесь появятся подходящие варианты.</div></div>',
+            '<div class="panel-sub">Опишите потребность бизнеса в чате — ассистент уточнит недостающие данные и подберёт подходящие варианты.</div></div>',
             unsafe_allow_html=True,
         )
     else:
@@ -1328,7 +1345,9 @@ with product_col:
             )
             if details.get("explanation"):
                 st.caption(details["explanation"])
-            if details.get("factors"):
+            # «Разбор решения» (факторы скоринга) — служебный блок сотрудников
+            # банка; предпринимателю остаётся «Объяснить решение (ИИ)»
+            if details.get("factors") and is_bank_user():
                 with st.expander("Разбор решения", key=f"app_factors_{application.get('id')}"):
                     for factor in details["factors"]:
                         contribution = factor.get("contribution")
@@ -1491,7 +1510,9 @@ with product_col:
                                     "проверьте параметры и отправьте её."
                                 )
                                 st.rerun()
-            if not DEMO_MODE:
+            # История статусов — служебный блок сотрудников банка:
+            # предпринимателю достаточно текущего статуса и объяснения решения
+            if not DEMO_MODE and is_bank_user():
                 render_application_history(application)
 
 

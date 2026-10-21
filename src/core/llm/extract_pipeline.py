@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from src.schemas.llm_schema import ContractExtraction
+from src.config.llm_config import REQUIRED_PROFILE_FIELDS
 from src.core.llm.utils import extract_profile_fields
 from src.core.recommendations import recommend_products
 from src.core.llm.LLMApi import LLMApi
@@ -56,11 +57,17 @@ def extract_content(
     )
     assistant_message_id = conv_rep.send_conversation_message(assistant_message)
 
+    # Подбор открывается ровно в тот момент, когда ассистент собрал все данные:
+    # сумма, срок и обязательные параметры бизнеса (срок работы, выручка, прибыль).
+    # До этого конвейер не возвращает рекомендации — продукты недоступны «в обход» диалога.
+    recommendation_required_fields = (
+        "requested_amount",
+        "preferred_term_months",
+        *REQUIRED_PROFILE_FIELDS,
+    )
     recommendations: list[dict] = []
-    if (
-        profile_dict is not None
-        and profile_dict.get("requested_amount") is not None
-        and profile_dict.get("preferred_term_months") is not None
+    if profile_dict is not None and all(
+        profile_dict.get(field) is not None for field in recommendation_required_fields
     ):
         recommendations = recommend_products(profile_dict)
     
