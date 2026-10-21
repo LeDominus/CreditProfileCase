@@ -23,9 +23,14 @@ def make_app():
 
 
 def fill_required_profile(at):
-    """Ассистент собрал обязательные параметры бизнеса (имитация извлечения полей)."""
+    """Ассистент собрал обязательные параметры бизнеса (имитация извлечения полей).
+
+    Включая сумму и срок: дефолтов у них нет, их указывает пользователь.
+    """
     at.session_state["profile"].update(
         {
+            "requested_amount": 1_500_000,
+            "preferred_term_months": 24,
             "business_age_months": 36,
             "monthly_revenue": 800_000,
             "monthly_profit": 150_000,

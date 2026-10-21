@@ -474,11 +474,12 @@ def init_state():
         "profile": {
             "industry": None,
             "funding_purpose": None,
-            "requested_amount": 1_500_000,
+            # сумма и срок не имеют дефолтов: их указывает пользователь в диалоге
+            "requested_amount": None,
             "business_age_months": None,
             "monthly_revenue": None,
             "monthly_profit": None,
-            "preferred_term_months": 24,
+            "preferred_term_months": None,
             "max_monthly_payment": None,
         },
         "recommendations": None,
@@ -581,6 +582,9 @@ def calculate_match(product, profile):
     term = profile.get("preferred_term_months")
     age = profile.get("business_age_months")
     purpose = (profile.get("funding_purpose") or "").lower()
+    # сумма и срок пользователь называет сам — без них матчинг невозможен
+    if amount is None or term is None:
+        return None
     if not product["min_amount"] <= amount <= product["max_amount"]:
         return None
     if not product["min_term"] <= term <= product["max_term"]:
@@ -1200,21 +1204,29 @@ with chat_col:
                     for key, label in REQUIRED_PROFILE_FIELDS.items()
                     if st.session_state.profile.get(key) is None
                 ]
+                # сумма и срок финансирования указывает пользователь —
+                # без них подбор невозможен, поэтому агент их тоже уточняет
+                if st.session_state.profile.get("funding_purpose") is None:
+                    missing.insert(0, "цель финансирования")
+                if st.session_state.profile.get("requested_amount") is None:
+                    missing.insert(1, "сумма финансирования (руб.)")
+                if st.session_state.profile.get("preferred_term_months") is None:
+                    missing.insert(2, "срок финансирования (в месяцах)")
                 if missing:
                     reply_text = (
-                        "Спасибо, я принял описание. Для отправки заявки не хватает "
-                        "данных: " + ", ".join(missing) + ". Уточните их, а также "
-                        "сумму, цель и срок финансирования."
+                        "Спасибо, я принял описание. Для подбора продукта не хватает "
+                        "данных: " + ", ".join(missing) + "."
                     )
                 else:
                     reply_text = (
-                        "Спасибо, все обязательные параметры зафиксированы. "
+                        "Спасибо, все параметры зафиксированы. "
                         "Нажмите «Подобрать продукты» — подберу варианты под ваш запрос."
                     )
             else:
                 # Профиль на backend создаётся при первом сообщении —
                 # тогда конвейер извлекает поля из каждого сообщения диалога
-                # и возвращает рекомендации, как только известны сумма и срок.
+                # и возвращает рекомендации, как только собраны все
+                # обязательные данные: сумма, срок и параметры бизнеса.
                 profile_id = ensure_backend_profile()
                 result = api_send_message(
                     st.session_state.active_conversation_id,
@@ -1248,10 +1260,11 @@ with chat_col:
         st.session_state.awaiting_reply = False
         st.rerun()
     # Кнопка подбора появляется ровно тогда, когда ассистент собрал все
-    # обязательные данные профиля — до этого подбор недоступен «в обход» диалога
+    # обязательные данные профиля, включая сумму и срок, названные пользователем, —
+    # до этого подбор недоступен «в обход» диалога
     profile_ready = all(
         st.session_state.profile.get(key) is not None
-        for key in REQUIRED_PROFILE_FIELDS
+        for key in (*REQUIRED_PROFILE_FIELDS, "requested_amount", "preferred_term_months")
     )
     if profile_ready and st.button("✦  Подобрать продукты", key="chat_recommend", use_container_width=True, type="primary"):
         with st.spinner("Подбираем продукты…"):
