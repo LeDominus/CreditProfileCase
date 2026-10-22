@@ -187,5 +187,44 @@ REGISTRY_ENTRIES = [
             "has_debts": False,
         },
     },
+    {
+        # компания в стадии ликвидации: топ-уровень записи, не входит в пакет
+        # ClientDataRequest — используется только стоп-фактором data_check
+        "inn": "7703456789",
+        "liquidation": True,
+        "company": {
+            "company_name": "ООО «Вектор-Строй»",
+            "ogrn": "1117746654321",
+            "registered_address": "г. Москва, ул. Складская, д. 7, стр. 2",
+            "registration_date": "2011-08-22T00:00:00",
+            "type_of_activity": "Производство строительных металлических конструкций",
+            "company_supervisor": "Дроздов Артур Николаевич",
+            "company_members": ["Дроздов Артур Николаевич"],
+            "company_place": "г. Москва, ул. Складская, д. 7, стр. 2",
+            "taxation_system": "УСН доходы минус расходы",
+            "company_members_count": 19,
+            "company_phone": "+74953334455",
+            "company_email": "info@vector-stroy.ru",
+        },
+        "supervisor": {
+            "full_name": "Дроздов Артур Николаевич",
+            "passport": "4505 112233",
+            "passport_issued_by": "ОУФМС России по г. Москве по р-ну Сокол, 10.09.2005",
+            "place_of_birth": "23.04.1979, г. Москва",
+            "citizenship": "russian",
+            "registration_address": "г. Москва, ул. Панфилова, д. 14, кв. 3",
+            "inn_fiz_face": "770234567890",
+            "supervisor_phone": "+79993334455",
+            "supervisor_email": "a.drozdov@vector-stroy.ru",
+            "owners_full_name": ["Дроздов Артур Николаевич"],
+            "owners_passport": ["4505 112233"],
+        },
+        "finance": {
+            "revenue": 31000000.0,
+            "profit": 2400000.0,
+            "current_loans_and_leasing": ["Сбербанк, остаток 900000, платёж 85000"],
+            "has_debts": False,
+        },
+    },
 ]
 

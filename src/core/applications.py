@@ -1,22 +1,20 @@
 import json
 from datetime import datetime, timezone
-
 from src.config.sql_queries import (
     CREATE_APPLICATION_QUERY,
     CREATE_APPLICATION_STATUS_HISTORY_QUERY,
+    GET_ALL_APPLICATIONS_QUERY,
     GET_APPLICATION_QUERY,
+    GET_APPLICATIONS_BY_STATUS_QUERY,
     GET_APPLICATION_STATUS_HISTORY_QUERY,
     GET_PROFILE_APPLICATIONS_QUERY,
+    GET_USER_APPLICATIONS_QUERY,
     UPDATE_APPLICATION_DETAILS_QUERY,
     UPDATE_APPLICATION_QUERY,
 )
 from src.database.database import DatabaseConnector
 from src.exceptions import ApplicationNotFoundError, InvalidApplicationStatusError
 from src.schemas.application_schema import Application, can_transition
-
-
-ACTOR_SYSTEM = "system"
-ACTOR_CLIENT = "client"
 
 
 class ApplicationRepository:
@@ -64,6 +62,31 @@ class ApplicationRepository:
             rows = conn.read_data(
                 sqlQuery=GET_PROFILE_APPLICATIONS_QUERY,
                 parameters={"profile_id": profile_id},
+            )
+        return [self._row_to_application(row) for row in rows]
+
+    def get_applications_by_user(self, user_id: int) -> list[Application]:
+        """Все заявки пользователя (по всем его профилям), новые сверху"""
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_USER_APPLICATIONS_QUERY,
+                parameters={"user_id": user_id},
+            )
+        return [self._row_to_application(row) for row in rows]
+
+    def get_all_applications(self, status: str | None = None) -> list[Application]:
+        """Все заявки (очередь сотрудника банка), новые сверху.
+
+        status — опциональный фильтр по статусу заявки.
+        """
+        if status is None:
+            with self.dbConn as conn:
+                rows = conn.read_data(sqlQuery=GET_ALL_APPLICATIONS_QUERY)
+            return [self._row_to_application(row) for row in rows]
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_APPLICATIONS_BY_STATUS_QUERY,
+                parameters={"status": status},
             )
         return [self._row_to_application(row) for row in rows]
 

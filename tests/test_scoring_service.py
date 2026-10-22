@@ -115,7 +115,7 @@ class TestHappyPath:
 
 
 class TestManualReviewTrigger:
-    """Триггер ручной проверки: интервал-заглушка MANUAL_REVIEW_SCORE_RANGE (до п. 2.5)."""
+    """Триггер ручной проверки: интервал MANUAL_REVIEW_SCORE_RANGE (п. 2.5)."""
 
     @staticmethod
     def _fix_score(monkeypatch, score):

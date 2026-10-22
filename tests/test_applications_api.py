@@ -505,3 +505,81 @@ class TestExplainEndpoint:
         body = response.json()
         assert body["source"] == "fallback"
         assert "Балл" in body["explanation"]
+class TestMyApplications:
+    """GET /api/me/applications — все заявки пользователя по всем его профилям."""
+
+    def test_requires_auth_401(self, client):
+        response = client.get("/api/me/applications", headers={"Authorization": ""})
+        assert response.status_code == 401
+
+    def test_returns_only_own_applications(self, client):
+        own = create_application(client)
+        foreign_headers = other_user_headers(client)
+        foreign_profile = client.post(
+            "/api/profile", json=dict(STRONG_PROFILE), headers=foreign_headers
+        ).json()["id"]
+        client.post(
+            "/api/applications",
+            json={
+                "profile_id": foreign_profile,
+                "product_id": 1,
+                "requested_amount": 1_500_000,
+                "term_months": 24,
+            },
+            headers=foreign_headers,
+        )
+        response = client.get("/api/me/applications")
+        assert response.status_code == 200
+        body = response.json()
+        ids = [app["id"] for app in body["applications"]]
+        assert own["id"] in ids
+        assert foreign_profile not in [app["profile_id"] for app in body["applications"]]
+
+    def test_applications_across_profiles(self, client):
+        profile_one = create_profile(client)
+        profile_two = create_profile(client)
+        first = create_application(client, profile_id=profile_one)
+        second = create_application(client, profile_id=profile_two)
+        response = client.get("/api/me/applications")
+        assert response.status_code == 200
+        ids = [app["id"] for app in response.json()["applications"]]
+        assert first["id"] in ids and second["id"] in ids
+
+    def test_newest_first(self, client):
+        first = create_application(client)
+        second = create_application(client)
+        response = client.get("/api/me/applications")
+        ids = [app["id"] for app in response.json()["applications"]]
+        assert ids.index(second["id"]) < ids.index(first["id"])
+
+    def test_status_reflects_bank_decision(self, client):
+        application = create_application(client)
+        submit_application(client, application["id"])
+        response = client.get("/api/me/applications")
+        apps = {app["id"]: app for app in response.json()["applications"]}
+        assert apps[application["id"]]["status"] != "draft"
+        assert apps[application["id"]]["score"] is not None
+
+
+class TestMyProfile:
+    """GET /api/me/profile — последний профиль пользователя (восстановление сессии)."""
+
+    def test_requires_auth_401(self, client):
+        response = client.get("/api/me/profile", headers={"Authorization": ""})
+        assert response.status_code == 401
+
+    def test_not_found_without_profiles(self, client):
+        assert client.get("/api/me/profile").status_code == 404
+
+    def test_returns_latest_profile(self, client):
+        first = create_profile(client)
+        second = create_profile(client)
+        response = client.get("/api/me/profile")
+        assert response.status_code == 200
+        assert response.json()["id"] == second
+        assert response.json()["id"] != first
+
+    def test_foreign_profiles_isolated(self, client):
+        create_profile(client)
+        foreign_headers = other_user_headers(client)
+        assert client.get("/api/me/profile", headers=foreign_headers).status_code == 404

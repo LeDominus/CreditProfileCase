@@ -232,6 +232,231 @@ def api_request(method, path, timeout=8, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Рабочее место сотрудника банка (п. 2.5): очередь заявок и действия по ролям
+# ---------------------------------------------------------------------------
+
+# Статусы очереди АРМ (демо-статусы фронтенда не показываем)
+ADMIN_QUEUE_STATUSES = (
+    "submitted", "data_check", "scoring", "needs_info", "manual_review",
+    "approved", "approved_with_changes", "rejected", "offer_ready",
+    "accepted", "signed", "issued", "client_declined", "draft",
+)
+
+ANALYST_DECISION_LABELS = {
+    "approved": "Одобрить на запрошенных условиях",
+    "approved_with_changes": "Одобрить на иных условиях",
+    "rejected": "Отказать",
+}
+
+# Пояснение для карточек без действий: у большинства статусов сотруднику
+# банка действовать не нужно (конвейер автоматический или ждём клиента)
+ADMIN_NO_ACTION_HINTS = {
+    "draft": "Черновик клиента — заявка ещё не отправлена в банк.",
+    "submitted": "Заявка получена и обрабатывается автоматически.",
+    "data_check": "Автоматическая проверка данных — действий сотрудника не требуется.",
+    "scoring": "Автоматический скоринг — действий сотрудника не требуется.",
+    "needs_info": "Ожидает уточнений от клиента — запрос уже отправлен.",
+    "approved": "Одобрена автоматически — предложение сформировано, ожидается решение клиента.",
+    "approved_with_changes": "Одобрена с изменениями автоматически — предложение сформировано.",
+    "rejected": "Отказ по стоп-факторам или скорингу — действия сотрудника не требуются.",
+    "offer_ready": "Предложение готово — ожидается решение клиента (принять/отклонить).",
+    "accepted": "Клиент принял условия — ожидается подписание договора.",
+    "signed": "Договор подписан клиентом — ожидается выдача финансирования.",
+    "issued": "Финансирование выдано — заявка закрыта.",
+    "client_declined": "Клиент отклонил предложение банка.",
+}
+
+
+@st.fragment(run_every=15)
+def render_bank_workspace():
+    """Рабочее место сотрудника банка: очередь заявок и действия по роли.
+
+    Фрагмент с автообновлением: очередь перезагружается каждые 15 секунд и
+    при любом взаимодействии — новые заявки клиентов видны без перезагрузки
+    страницы (иначе сотрудник видел бы устаревший список до F5).
+    """
+    role = (st.session_state.auth_user or {}).get("role")
+    st.markdown(
+        '<div class="page-title">Рабочее место сотрудника банка</div>'
+        '<div class="panel-sub">Очередь заявок и полнота данных (обновляется автоматически). '
+        'Менеджер запрашивает уточнения и передаёт заявки аналитику, '
+        'аналитик принимает решение с причиной.</div>',
+        unsafe_allow_html=True,
+    )
+    filter_col, refresh_col = st.columns([4, 1])
+    with filter_col:
+        status_filter = st.selectbox(
+            "Фильтр по статусу",
+            options=(None, *ADMIN_QUEUE_STATUSES),
+            format_func=lambda s: "Все статусы" if s is None else STATUS_LABELS.get(s, (s, "🔵"))[0],
+            key="admin_status_filter",
+        )
+    with refresh_col:
+        if st.button("Обновить", key="admin_refresh", use_container_width=True):
+            st.rerun()
+    try:
+        result = api_get_admin_applications(status_filter)
+    except requests.RequestException as exc:
+        st.error(f"Не удалось загрузить очередь заявок: {exc}")
+        return
+    applications = result.get("applications") or []
+    if not applications:
+        st.info("Заявок по выбранному фильтру нет.")
+        return
+    for application in applications:
+        render_admin_application_card(application, role)
+
+
+def render_admin_application_card(application, role):
+    """Карточка заявки в очереди: параметры, данные клиента, действия по роли."""
+    status_key = application.get("status", "draft")
+    status_label, status_icon = STATUS_LABELS.get(status_key, (status_key, "🔵"))
+    details = application.get("decision_details") or {}
+    client_data = application.get("client_data") or {}
+    company = client_data.get("company") or {}
+    app_id = application.get("id")
+    score_line = (
+        f" · балл скоринга: {application['score']:g}"
+        if application.get("score") is not None
+        else ""
+    )
+    with st.container(border=True):
+        st.markdown(
+            f"**{status_icon} № {app_id} · {application.get('product_name', 'Заявка')}** — "
+            f"{money(application.get('requested_amount'))} на {application.get('term_months')} мес · "
+            f"платёж {money(application.get('monthly_payment'))}/мес"
+        )
+        st.caption(
+            f"Статус: {status_label}{score_line} · обновлена "
+            f"{datetime.fromisoformat(application.get('updated_at')).strftime('%d.%m.%Y %H:%M')}"
+        )
+        if company:
+            st.caption(
+                f"Клиент: {company.get('company_name', '—')} (ИНН {company.get('inn', '—')})"
+            )
+        if details.get("explanation"):
+            st.caption(details["explanation"])
+        with st.expander("Данные заявки", key=f"admin_data_{app_id}"):
+            render_admin_client_data(client_data)
+        if details.get("factors"):
+            with st.expander("Разбор решения", key=f"admin_factors_{app_id}"):
+                for factor in details["factors"]:
+                    contribution = factor.get("contribution")
+                    contribution_line = (
+                        f" · вклад в балл: {contribution:+g}"
+                        if contribution is not None
+                        else ""
+                    )
+                    st.markdown(
+                        f"**{factor.get('label', factor.get('name'))}** — "
+                        f"{factor.get('value')}{contribution_line}"
+                    )
+        render_admin_actions(application, role)
+
+
+def render_admin_client_data(client_data):
+    """Сводка пакета данных клиента для сотрудника банка."""
+    if not client_data:
+        st.caption("Пакет данных клиента не передавался (заявка создана без автозаполнения по ИНН).")
+        return
+    company = client_data.get("company") or {}
+    supervisor = client_data.get("supervisor") or {}
+    finance = client_data.get("finance") or {}
+    credit = client_data.get("credit") or {}
+    st.markdown(
+        f"**Компания:** {company.get('company_name', '—')} · ИНН {company.get('inn', '—')} · "
+        f"{company.get('type_of_activity', '—')}\n\n"
+        f"**Руководитель:** {supervisor.get('full_name', '—')}\n\n"
+        f"**Кредит:** {money(credit.get('credit_sum'))} на {credit.get('credit_term_months')} мес — "
+        f"{credit.get('credit_target', '—')}\n\n"
+        f"**Финансы за год:** выручка {money(finance.get('revenue'))} · "
+        f"прибыль {money(finance.get('profit'))} · "
+        f"{'есть просроченная задолженность' if finance.get('has_debts') else 'просроченной задолженности нет'}"
+    )
+    loans = finance.get("current_loans_and_leasing") or []
+    if loans:
+        st.caption("Действующие кредиты и лизинг: " + "; ".join(loans))
+
+
+def render_admin_actions(application, role):
+    """Действия сотрудника: менеджер — уточнения и передача аналитику,
+    аналитик — решение с обязательной причиной.
+
+    Для статусов без действий показываем пояснение, что происходит с заявкой
+    (иначе карточки без кнопок выглядят как «сломанный» механизм действий).
+    """
+    status_key = application.get("status")
+    app_id = application.get("id")
+    actions_rendered = False
+    if role == "bank_manager" and status_key in ("data_check", "scoring", "manual_review"):
+        actions_rendered = True
+        message = st.text_area(
+            "Запрос уточнений у клиента",
+            key=f"admin_request_{app_id}",
+            placeholder="Что именно нужно уточнить у клиента",
+        )
+        request_col, assign_col = st.columns(2)
+        with request_col:
+            if st.button(
+                "Запросить уточнения",
+                key=f"admin_request_btn_{app_id}",
+                type="primary",
+                use_container_width=True,
+                disabled=len(message.strip()) < 3,
+            ):
+                try:
+                    api_admin_request_info(app_id, message.strip())
+                except requests.RequestException as exc:
+                    st.error(f"Не удалось отправить запрос клиенту: {exc}")
+                else:
+                    st.success("Запрос отправлен — заявка ожидает уточнений от клиента.")
+                    st.rerun()
+        with assign_col:
+            if status_key in ("data_check", "scoring") and st.button(
+                "Передать аналитику",
+                key=f"admin_assign_btn_{app_id}",
+                use_container_width=True,
+            ):
+                try:
+                    api_admin_assign_analyst(app_id)
+                except requests.RequestException as exc:
+                    st.error(f"Не удалось передать заявку аналитику: {exc}")
+                else:
+                    st.success("Заявка передана кредитному аналитику.")
+                    st.rerun()
+    elif role == "bank_analyst" and status_key == "manual_review":
+        actions_rendered = True
+        decision = st.selectbox(
+            "Решение",
+            options=list(ANALYST_DECISION_LABELS),
+            format_func=lambda value: ANALYST_DECISION_LABELS[value],
+            key=f"admin_decision_{app_id}",
+        )
+        reason = st.text_area(
+            "Причина решения (обязательна)",
+            key=f"admin_reason_{app_id}",
+        )
+        if st.button(
+            "Принять решение",
+            key=f"admin_decision_btn_{app_id}",
+            type="primary",
+            use_container_width=True,
+            disabled=len(reason.strip()) < 3,
+        ):
+            try:
+                api_admin_decision(app_id, decision, reason.strip())
+            except requests.RequestException as exc:
+                st.error(f"Не удалось зафиксировать решение: {exc}")
+            else:
+                st.success("Решение зафиксировано.")
+                st.rerun()
+    if not actions_rendered:
+        hint = ADMIN_NO_ACTION_HINTS.get(status_key)
+        if hint:
+            st.caption(f"Действия не требуются: {hint}")
+
+
+# ---------------------------------------------------------------------------
 # API-клиент: обёртки над всеми эндпоинтами, реализованными на backend (main.py)
 # ---------------------------------------------------------------------------
 
@@ -395,6 +620,16 @@ def api_get_profile(profile_id) -> dict:
     return api_request("GET", f"/api/profile/{profile_id}")
 
 
+def api_get_my_applications() -> dict:
+    """GET /api/me/applications — все заявки текущего пользователя, новые сверху."""
+    return api_request("GET", "/api/me/applications")
+
+
+def api_get_my_profile() -> dict:
+    """GET /api/me/profile — последний профиль пользователя (восстановление сессии)."""
+    return api_request("GET", "/api/me/profile")
+
+
 def api_calc_profile_payment(profile_id) -> dict:
     """POST /api/profile/{id}/payment — аннуитетный расчёт по профилю:
     лучший продукт, ежемесячный платёж, total и переплата."""
@@ -471,6 +706,35 @@ def api_explain_application(application_id, audience: str = "client") -> dict:
         f"/api/applications/{application_id}/explain",
         json={"audience": audience},
         timeout=120,
+    )
+
+
+def api_get_admin_applications(status_filter=None) -> dict:
+    """GET /api/admin/applications — очередь заявок для сотрудников банка."""
+    params = {"status": status_filter} if status_filter else None
+    return api_request("GET", "/api/admin/applications", params=params)
+
+
+def api_admin_request_info(application_id, message) -> dict:
+    """POST /api/admin/applications/{id}/request-info — запрос уточнений менеджером."""
+    return api_request(
+        "POST",
+        f"/api/admin/applications/{application_id}/request-info",
+        json={"message": message},
+    )
+
+
+def api_admin_assign_analyst(application_id) -> dict:
+    """POST /api/admin/applications/{id}/assign-analyst — передача заявки аналитику."""
+    return api_request("POST", f"/api/admin/applications/{application_id}/assign-analyst")
+
+
+def api_admin_decision(application_id, decision, reason) -> dict:
+    """POST /api/admin/applications/{id}/decision — решение аналитика с причиной."""
+    return api_request(
+        "POST",
+        f"/api/admin/applications/{application_id}/decision",
+        json={"decision": decision, "reason": reason},
     )
 
 
@@ -595,6 +859,65 @@ def restore_conversations():
     logger.info("История диалогов восстановлена с backend: %d шт.", len(remote))
 
 
+def backend_application_to_record(app: dict) -> dict:
+    """Заявка из ответа backend в формат списка «Мои заявки»."""
+    created = str(app.get("created_at") or "")
+    return {
+        "id": app.get("id"),
+        "product_name": app.get("product_name") or "Заявка",
+        "product_id": app.get("product_id"),
+        "amount": app.get("requested_amount"),
+        "term": app.get("term_months"),
+        "monthly_payment": app.get("monthly_payment"),
+        "total_repayment": app.get("total_repayment"),
+        "overpayment": app.get("overpayment"),
+        "status": app.get("status", "draft"),
+        "score": app.get("score"),
+        "decision_details": app.get("decision_details") or {},
+        "client_data": app.get("client_data"),
+        "created_at": created[:16].replace("T", " ")
+        or datetime.now().strftime("%d.%m.%Y %H:%M"),
+    }
+
+
+def sync_applications_from_backend():
+    """Живой режим: актуальные статусы и решения банка по заявкам клиента.
+
+    Обновляет известные заявки и добавляет созданные в других сессиях —
+    решения банка (ручная экспертиза → предложение) видны клиенту без его
+    собственных действий, список переживает перезагрузку и повторный вход.
+    """
+    if DEMO_MODE or not st.session_state.get("auth_token"):
+        return
+    try:
+        result = api_get_my_applications()
+    except requests.RequestException as exc:
+        logger.warning("Заявки не синхронизированы с backend: %s", exc)
+        return
+    remote_apps = result.get("applications") or []
+    remote_by_id = {app.get("id"): app for app in remote_apps}
+    for record in st.session_state.applications:
+        remote = remote_by_id.get(record.get("id"))
+        if remote is None:
+            continue
+        record["status"] = remote.get("status", record.get("status"))
+        record["score"] = remote.get("score", record.get("score"))
+        if remote.get("decision_details"):
+            record["decision_details"] = remote["decision_details"]
+        for key, remote_key in (
+            ("amount", "requested_amount"),
+            ("term", "term_months"),
+            ("monthly_payment", "monthly_payment"),
+        ):
+            if remote.get(remote_key) is not None:
+                record[key] = remote[remote_key]
+    known_ids = {record.get("id") for record in st.session_state.applications}
+    # заявки из других сессий добавляем сверху, новые — первыми
+    for app in reversed(remote_apps):
+        if app.get("id") not in known_ids:
+            st.session_state.applications.insert(0, backend_application_to_record(app))
+
+
 def calculate_match(product, profile):
     amount = profile.get("requested_amount")
     term = profile.get("preferred_term_months")
@@ -648,9 +971,26 @@ def get_recommendations():
 
 
 def ensure_backend_profile():
-    """Идентификатор профиля на backend: создаёт профиль при первом обращении."""
+    """Идентификатор профиля на backend: создаёт профиль при первом обращении.
+
+    Живой режим: сначала пробуем продолжить последний профиль пользователя
+    (GET /api/me/profile) — иначе каждая сессия плодила бы новый профиль,
+    а заявки клиента оказывались раскиданы по разным профилям.
+    """
     if st.session_state.backend_profile_id is not None:
         return st.session_state.backend_profile_id
+    if not DEMO_MODE:
+        try:
+            profile = api_get_my_profile()
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                logger.warning("Профиль пользователя не получен с backend: %s", exc)
+        except requests.RequestException as exc:
+            logger.warning("Backend недоступен, профиль не восстановлен: %s", exc)
+        else:
+            st.session_state.backend_profile_id = profile.get("id")
+            logger.info("Профиль пользователя восстановлен с backend: id=%s", profile.get("id"))
+            return st.session_state.backend_profile_id
     profile_data = {
         key: value for key, value in st.session_state.profile.items() if value is not None
     }
@@ -1102,9 +1442,11 @@ def client_data_dialog():
         "Введите ИНН — компания, руководитель и финансы заполнятся автоматически из реестра. "
         "Проверьте данные, загрузите документы и отметьте согласия."
     )
-    st.text_input("ИНН компании", key="cd_inn", placeholder="10 цифр — ООО, 12 цифр — ИП")
+    inn_value = st.text_input("ИНН компании", key="cd_inn", placeholder="10 цифр — ООО, 12 цифр — ИП")
     if st.button("Заполнить по ИНН", key="cd_lookup", use_container_width=True):
-        entry = lookup_registry(st.session_state.get("cd_inn", "").strip())
+        # значение берём из возврата виджета — оно гарантированно свежее
+        # на момент клика (в отличие от чтения session_state в диалогах)
+        entry = lookup_registry((inn_value or "").strip())
         st.session_state.registry_entry = entry
         if entry is not None:
             apply_registry_entry(entry)
@@ -1161,6 +1503,30 @@ def client_data_dialog():
             st.rerun()
 
 
+# Подсказка клиенту «что дальше» по финальному статусу заявки (диалог после отправки)
+NEXT_STEP_HINTS = {
+    "submitted": "Заявка принята банком и обрабатывается автоматически.",
+    "data_check": "Заявка на автоматической проверке данных.",
+    "scoring": "Заявка на автоматическом скоринге.",
+    "manual_review": (
+        "Заявка передана кредитному аналитику банка (ручная экспертиза). "
+        "Следите за статусом в разделе «Мои заявки» — решение появится там."
+    ),
+    "needs_info": (
+        "Банк запросил уточнения по заявке. Причина — в разделе «Мои заявки»: "
+        "уточните данные и отправьте заявку на повторную обработку."
+    ),
+    "offer_ready": (
+        "Предложение банка готово! Примите или отклоните условия "
+        "в разделе «Мои заявки»."
+    ),
+    "rejected": (
+        "По заявке получен отказ. Причина и возможные альтернативные "
+        "продукты — в разделе «Мои заявки»."
+    ),
+}
+
+
 @st.dialog("Заявка принята", width="large", icon="✅", on_dismiss="rerun")
 def application_accepted_dialog(application):
     """Отдельное окно: заявка отправлена — итоги и следующий шаг."""
@@ -1181,6 +1547,13 @@ def application_accepted_dialog(application):
             "Заявка сохранена как черновик. Отправьте её на обработку "
             "в разделе «Мои заявки», когда будете готовы."
         )
+    else:
+        hint = NEXT_STEP_HINTS.get(status_key)
+        if hint:
+            st.info(hint)
+    details = application.get("decision_details") or {}
+    if details.get("explanation"):
+        st.caption(details["explanation"])
     st.caption(
         "Отправка заявки не означает одобрение кредита. В демо-режиме статус "
         "назначается автоматически и не отражает решение банка."
@@ -1399,7 +1772,7 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    if st.button("＋  Новая заявка", use_container_width=True, type="primary"):
+    if not is_bank_user() and st.button("＋  Новая заявка", use_container_width=True, type="primary"):
         create_conversation()
         st.rerun()
     st.markdown('<div class="section-kicker">История диалогов</div>', unsafe_allow_html=True)
@@ -1435,6 +1808,22 @@ with st.sidebar:
                 st.rerun()
         backend_state = "онлайн" if st.session_state.api_available else "недоступен"
         st.caption(f"API: {API_BASE_URL} · {backend_state}")
+
+# Рабочее место сотрудника банка (п. 2.5): банковские роли видят очередь заявок
+# вместо клиентского кабинета с ИИ-ассистентом
+if not DEMO_MODE and is_bank_user():
+    render_bank_workspace()
+    st.markdown(
+        '<div style="padding:22px 0 8px;text-align:center;color:#9aa5b5;font-size:10px">ФинПомощник · MVP · Демонстрационный прототип на синтетических данных</div>',
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+# Живой режим: заявки клиента синхронизируются с backend на каждом rerun —
+# решения банка (ручная экспертиза, предложение) видны без собственных
+# действий клиента, список переживает перезагрузку и повторный вход
+if not DEMO_MODE:
+    sync_applications_from_backend()
 
 # «Минимум»: без hero-экрана — диалог начинается сразу
 if not st.session_state.active_conversation_id:
@@ -1651,7 +2040,11 @@ with product_col:
                     if form_error:
                         st.warning(form_error)
                     elif submit_application(selected, int(chosen_amount), int(chosen_term), client_data):
-                        application_accepted_dialog(st.session_state.applications[0])
+                        # отправка сразу за созданием: черновик -> submitted ->
+                        # конвейер банка за один клик (без второго «Отправить заявку»)
+                        record = st.session_state.applications[0]
+                        send_application(record)
+                        application_accepted_dialog(record)
             with cancel_col:
                 if st.button("Отмена", use_container_width=True):
                     st.session_state.show_confirm = False
@@ -1660,6 +2053,9 @@ with product_col:
     # --- Мои заявки: путь от обращения до выдачи ---------------------------
     if st.session_state.applications:
         st.markdown('<div class="chip-label">Мои заявки</div>', unsafe_allow_html=True)
+        if not DEMO_MODE and st.button("Обновить статусы", key="apps_refresh"):
+            sync_applications_from_backend()
+            st.rerun()
         for application in st.session_state.applications:
             status_key = application.get("status", "draft")
             status_label, status_icon = STATUS_LABELS.get(status_key, ("Получена", "🔵"))
@@ -1703,9 +2099,17 @@ with product_col:
                         )
                     else:
                         st.caption("Полнота данных: все обязательные поля профиля заполнены.")
-                    st.caption(
-                        "Стоп-факторы: не зафиксированы (проверка данных пройдена автоматически)."
-                    )
+                    stop_factors = details.get("stop_factors") or []
+                    if stop_factors:
+                        st.caption(
+                            "Стоп-факторы: "
+                            + "; ".join(factor.get("label", "") for factor in stop_factors)
+                            + "."
+                        )
+                    else:
+                        st.caption(
+                            "Стоп-факторы: не зафиксированы (проверка данных пройдена автоматически)."
+                        )
             if details.get("decision") and not DEMO_MODE:
                 if st.button(
                     "Объяснить решение (ИИ)",
@@ -1803,6 +2207,8 @@ with product_col:
                         st.rerun()
             elif status_key == "needs_info":
                 missing = ", ".join(details.get("missing_fields") or [])
+                if details.get("needs_info_reason"):
+                    st.warning(f"Запрос сотрудника банка: {details['needs_info_reason']}")
                 st.warning(
                     "Уточните данные о бизнесе в диалоге"
                     + (f": {missing}" if missing else "")
@@ -1816,6 +2222,14 @@ with product_col:
                     if rescore_application(application):
                         st.rerun()
             elif status_key == "rejected":
+                # п. 2.6: стоп-факторы — отказ до скоринга с понятной причиной
+                stop_factors = details.get("stop_factors") or []
+                if stop_factors:
+                    st.error(
+                        "Отказ до скоринга: "
+                        + "; ".join(factor.get("label", "") for factor in stop_factors)
+                        + "."
+                    )
                 # п. 2.7: альтернативные продукты при отказе
                 alternatives = details.get("alternatives") or []
                 if alternatives:

@@ -1,12 +1,13 @@
 from src.config.scoring_config import MANUAL_REVIEW_SCORE_RANGE
 from src.core.alternatives import suggest_alternative_products
 from src.core.applications import (
-    ACTOR_SYSTEM,
     ApplicationRepository,
     transition_application,
 )
+from src.config.database_config import ROLE_SYSTEM
 from src.core.profile import ProfileRepository
 from src.core.scoring import score_application
+from src.core.stop_factors import find_stop_factors
 from src.schemas.application_schema import (
     STATUS_APPROVED,
     STATUS_APPROVED_WITH_CHANGES,
@@ -38,7 +39,8 @@ def process_application_scoring(
     Все смены статуса идут через transition_application (единая точка)
     с записью в application_status_history.
 
-    Этап data_check до п. 2.6 — мгновенный проход (заглушка).
+    Этап data_check проверяет стоп-факторы (п. 2.6): ликвидация компании или
+    текущая просрочка — мгновенный отказ с объяснением до скоринга.
     """
     application = _get_application(app_rep, application_id)
     if application.status not in PIPELINE_ENTRY_STATUSES:
@@ -55,11 +57,14 @@ def process_application_scoring(
             f"Product with id={application.product_id} not found"
         )
 
-    # Этап 1: проверка полноты данных (до п. 2.6 — мгновенный проход)
+    # Этап 1: проверка данных — сбор сведений и стоп-факторы (п. 2.6)
     application = _transition(
         app_rep, application, STATUS_DATA_CHECK,
-        comment="Проверка данных пройдена",
+        comment="Проверка данных: сбор сведений и стоп-факторы",
     )
+    stop_factors = find_stop_factors(application.client_data)
+    if stop_factors:
+        return _reject_on_stop_factors(app_rep, application, stop_factors)
 
     # Этап 2: скоринг
     application = _transition(app_rep, application, STATUS_SCORING)
@@ -110,6 +115,28 @@ def process_application_scoring(
     return application, scoring
 
 
+def _reject_on_stop_factors(
+    app_rep: ApplicationRepository,
+    application: Application,
+    stop_factors: list[dict],
+) -> tuple[Application, dict]:
+    """Отказ на этапе data_check: стоп-факторы с понятной причиной (п. 2.6)."""
+    labels = "; ".join(factor["label"] for factor in stop_factors)
+    details = {
+        "stop_factors": stop_factors,
+        "explanation": (
+            f"Отказ до скоринга — сработали стоп-факторы: {labels}. "
+            "Заявка не может быть одобрена, пока эти условия не сняты."
+        ),
+    }
+    application.decision = STATUS_REJECTED
+    application.decision_details = details
+    application = _transition(
+        app_rep, application, STATUS_REJECTED, comment=details["explanation"]
+    )
+    return application, details
+
+
 def _needs_alternatives(result: ScoringResult) -> bool:
     """Альтернативные продукты показываются при отказе, а также когда
     подобрать изменённые условия в рамках продукта не удалось (п. 2.7)."""
@@ -122,10 +149,7 @@ def _needs_alternatives(result: ScoringResult) -> bool:
 
 
 def _in_manual_review_range(score: float | None) -> bool:
-    """Балл в пограничном интервале ручной проверки.
-
-    MANUAL_REVIEW_SCORE_RANGE — заглушка до п. 2.5: None выключает триггер.
-    """
+    """Балл в пограничном интервале ручной проверки (п. 2.5)."""
     if MANUAL_REVIEW_SCORE_RANGE is None or score is None:
         return False
     low, high = MANUAL_REVIEW_SCORE_RANGE
@@ -141,7 +165,7 @@ def _transition(
     """Смена статуса через единую точку; сбои БД -> ScoringRepositoryError."""
     try:
         return transition_application(
-            application, target_status, ACTOR_SYSTEM, None, app_rep, comment=comment
+            application, target_status, ROLE_SYSTEM, None, app_rep, comment=comment
         )
     except ScoringError:
         raise

@@ -4,14 +4,12 @@ import uvicorn
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from src.core.llm.extract_pipeline import extract_content
 from src.core.llm.explain_pipeline import explain_application_decision
 from src.config.products import PRODUCTS
 from src.core.llm.LLMApi import LLMApi
 from src.core.applications import (
-    ACTOR_CLIENT,
-    ACTOR_SYSTEM,
     ApplicationRepository,
     transition_application,
 )
@@ -26,7 +24,7 @@ from src.core.auth.auth_service_methods import (
     register_user,
     user_response
 )
-from src.core.auth.dependencies import get_current_user
+from src.core.auth.dependencies import get_current_user, require_role
 from src.core.profile import ProfileRepository
 from src.core.recommendations import recommend_products
 from src.core.registry import get_registry_entry
@@ -51,12 +49,20 @@ from src.database.database import DatabaseConnector
 from src.database.migrations import apply_migrations
 from src.schemas.llm_schema import ContractExtraction
 from src.schemas.application_schema import (
+    APPLICATION_STATUSES,
     STATUS_ACCEPTED,
+    STATUS_APPROVED,
+    STATUS_APPROVED_WITH_CHANGES,
     STATUS_CLIENT_DECLINED,
     STATUS_DRAFT,
     STATUS_ISSUED,
+    STATUS_MANUAL_REVIEW,
+    STATUS_NEEDS_INFO,
+    STATUS_OFFER_READY,
     STATUS_SIGNED,
     STATUS_SUBMITTED,
+    AdminDecisionRequest,
+    AdminRequestInfoRequest,
     Application,
     ApplicationCreateRequest,
     ApplicationExplainRequest,
@@ -88,9 +94,15 @@ from src.config.sql_queries import (
 from src.utils import (
     profile_to_dict, get_product,
     application_response,
+    get_application_or_404,
     get_owned_application_or_404,
     get_owned_conversation_or_404,
     get_owned_profile_or_404, setup_logging,
+)
+from src.config.database_config import (
+    BANK_ROLES, ROLE_BANK_ANALYST,
+    ROLE_BANK_MANAGER, ROLE_CLIENT,
+    ROLE_SYSTEM
 )
 
 logger = logging.getLogger(__name__)
@@ -495,7 +507,7 @@ def submit_application(
     """Отправка заявки на обработку: draft -> submitted + автозапуск конвейера."""
     application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
     try:
-        transition_application(application, STATUS_SUBMITTED, ACTOR_CLIENT, user.id, app_rep)
+        transition_application(application, STATUS_SUBMITTED, ROLE_CLIENT, user.id, app_rep)
         application, scoring = process_application_scoring(application_id, app_rep, profile_rep)
     except ApplicationNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -601,7 +613,7 @@ def respond_to_offer(
     ) else None
     try:
         application = transition_application(
-            application, target_status, ACTOR_CLIENT, user.id, app_rep, comment=comment
+            application, target_status, ROLE_CLIENT, user.id, app_rep, comment=comment
         )
     except InvalidApplicationStatusError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
@@ -619,11 +631,11 @@ def sign_application(
     application = get_owned_application_or_404(app_rep, profile_rep, application_id, user.id)
     try:
         application = transition_application(
-            application, STATUS_SIGNED, ACTOR_CLIENT, user.id, app_rep,
+            application, STATUS_SIGNED, ROLE_CLIENT, user.id, app_rep,
             comment="Договор подписан (ЭП)",
         )
         application = transition_application(
-            application, STATUS_ISSUED, ACTOR_SYSTEM, None, app_rep,
+            application, STATUS_ISSUED, ROLE_SYSTEM, None, app_rep,
             comment="Договор подписан, выдача исполнена",
         )
     except InvalidApplicationStatusError as e:
@@ -708,6 +720,137 @@ def get_profile_applications(
         "profile_id": profile_id,
         "applications": [application_response(a) for a in applications],
     }
+
+
+@app.get("/api/me/applications")
+def get_my_applications(
+    user: User = Depends(get_current_user),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Все заявки текущего пользователя (по всем его профилям), новые сверху.
+
+    Фронтенд синхронизирует по этому эндпоинту статусы заявок клиента —
+    решения банка (ручная экспертиза, предложение) видны без действий клиента.
+    """
+    try:
+        applications = app_rep.get_applications_by_user(user.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list applications: {str(e)}")
+    return {"status": "success", "applications": [application_response(a) for a in applications]}
+
+
+@app.get("/api/me/profile", response_model=BusinessProfile)
+def get_my_profile(
+    user: User = Depends(get_current_user),
+    profile_rep: ProfileRepository = Depends(load_profile_repository),
+) -> BusinessProfile:
+    """Последний профиль текущего пользователя — восстановление сессии клиента.
+
+    404 — если у пользователя ещё нет профилей (клиент создаст его при первом сообщении).
+    """
+    try:
+        profile = profile_rep.get_latest_profile_by_user(user.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Profile for current user not found",
+        )
+    return profile
+
+
+@app.get("/api/admin/applications")
+def admin_list_applications(
+    status_filter: str | None = Query(default=None, alias="status"),
+    user: User = Depends(require_role(*BANK_ROLES)),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Очередь заявок для сотрудников банка: все заявки, новые сверху (п. 2.5)."""
+    if status_filter is not None and status_filter not in APPLICATION_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown status {status_filter!r}; must be one of {APPLICATION_STATUSES}",
+        )
+    try:
+        applications = app_rep.get_all_applications(status_filter)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list applications: {str(e)}")
+    return {"status": "success", "applications": [application_response(a) for a in applications]}
+
+
+@app.post("/api/admin/applications/{application_id}/request-info")
+def admin_request_info(
+    application_id: int,
+    payload: AdminRequestInfoRequest,
+    user: User = Depends(require_role(ROLE_BANK_MANAGER)),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Менеджер запрашивает уточнения: data_check|scoring|manual_review -> needs_info."""
+    application = get_application_or_404(app_rep, application_id)
+    application.decision_details = {
+        **(application.decision_details or {}),
+        "needs_info_reason": payload.message,
+    }
+    try:
+        application = transition_application(
+            application, STATUS_NEEDS_INFO, ROLE_BANK_MANAGER, user.id, app_rep,
+            comment=payload.message,
+        )
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"status": "success", "application": application_response(application)}
+
+
+@app.post("/api/admin/applications/{application_id}/assign-analyst")
+def admin_assign_analyst(
+    application_id: int,
+    user: User = Depends(require_role(ROLE_BANK_MANAGER)),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Менеджер передаёт заявку на ручную экспертизу: data_check|scoring -> manual_review."""
+    application = get_application_or_404(app_rep, application_id)
+    try:
+        application = transition_application(
+            application, STATUS_MANUAL_REVIEW, ROLE_BANK_MANAGER, user.id, app_rep,
+            comment="Заявка передана кредитному аналитику",
+        )
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"status": "success", "application": application_response(application)}
+
+
+@app.post("/api/admin/applications/{application_id}/decision")
+def admin_decision(
+    application_id: int,
+    payload: AdminDecisionRequest,
+    user: User = Depends(require_role(ROLE_BANK_ANALYST)),
+    app_rep: ApplicationRepository = Depends(load_application_repository),
+) -> dict:
+    """Решение аналитика по заявке в ручной экспертизе: approved*|rejected с причиной."""
+    application = get_application_or_404(app_rep, application_id)
+    application.decision = payload.decision
+    application.decision_details = {
+        **(application.decision_details or {}),
+        "analyst_decision": {
+            "decision": payload.decision,
+            "reason": payload.reason,
+            "analyst": user.username,
+        },
+    }
+    try:
+        application = transition_application(
+            application, payload.decision, ROLE_BANK_ANALYST, user.id, app_rep,
+            comment=payload.reason,
+        )
+        if payload.decision in (STATUS_APPROVED, STATUS_APPROVED_WITH_CHANGES):
+            application = transition_application(
+                application, STATUS_OFFER_READY, ROLE_SYSTEM, None, app_rep,
+                comment="Предложение сформировано",
+            )
+    except InvalidApplicationStatusError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"status": "success", "application": application_response(application)}
 
 
 @app.get("/api/registry/{inn}")
