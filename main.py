@@ -29,6 +29,7 @@ from src.core.auth.auth_service_methods import (
 from src.core.auth.dependencies import get_current_user
 from src.core.profile import ProfileRepository
 from src.core.recommendations import recommend_products
+from src.core.registry import get_registry_entry
 from src.core.scoring_service import (
     ApplicationNotFoundError,
     InvalidApplicationStatusError,
@@ -445,6 +446,7 @@ def create_application(
         total_repayment=total_repayment,
         overpayment=overpayment,
         status=STATUS_DRAFT,
+        client_data=payload.client_data.model_dump(mode="json") if payload.client_data is not None else None,
     )
     try:
         application_id = app_rep.create_application(application)
@@ -706,6 +708,18 @@ def get_profile_applications(
         "profile_id": profile_id,
         "applications": [application_response(a) for a in applications],
     }
+
+
+@app.get("/api/registry/{inn}")
+def get_registry(inn: str) -> dict:
+    """Тестовый реестр: данные компании и руководителя по ИНН (мок справочника)"""
+    entry = get_registry_entry(inn)
+    if entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Registry entry for inn={inn} not found",
+        )
+    return {"status": "success", **entry}
 
 
 @app.get("/api/products")

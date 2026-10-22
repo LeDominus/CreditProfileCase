@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from src.schemas.profile_schema import ClientDataRequest
+
 
 STATUS_DRAFT = "draft"  # черновик: заявка сохранена, не отправлена
 STATUS_SUBMITTED = "submitted"  # отправлена клиентом в банк
@@ -86,16 +88,18 @@ class Application:
     score: float | None = None
     decision: str | None = None
     decision_details: dict | None = None
+    client_data: dict | None = None
     id: int | None = None
 
 
 class ApplicationCreateRequest(BaseModel):
-    """Создание заявки: профиль + продукт + параметры"""
+    """Создание заявки: профиль + продукт + параметры + пакет данных клиента"""
     model_config = ConfigDict(extra="forbid")
     profile_id: int
     product_id: int
     requested_amount: float
     term_months: int
+    client_data: ClientDataRequest | None = None
 
 
 class ApplicationUpdateRequest(BaseModel):

@@ -106,18 +106,18 @@ CREATE_APPLICATION_QUERY = """
     INSERT INTO applications (
         profile_id, product_id, product_name, requested_amount, term_months,
         monthly_payment, total_repayment, overpayment, status,
-        score, decision, decision_details, created_at, updated_at
+        score, decision, decision_details, client_data, created_at, updated_at
     ) VALUES (
         :profile_id, :product_id, :product_name, :requested_amount, :term_months,
         :monthly_payment, :total_repayment, :overpayment, :status,
-        :score, :decision, :decision_details, :created_at, :updated_at
+        :score, :decision, :decision_details, :client_data, :created_at, :updated_at
     )
 """
 
 GET_APPLICATION_QUERY = """
     SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
            monthly_payment, total_repayment, overpayment, status,
-           score, decision, decision_details, created_at, updated_at
+           score, decision, decision_details, client_data, created_at, updated_at
     FROM applications
     WHERE id = :id
 """
@@ -125,7 +125,7 @@ GET_APPLICATION_QUERY = """
 GET_PROFILE_APPLICATIONS_QUERY = """
     SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
            monthly_payment, total_repayment, overpayment, status,
-           score, decision, decision_details, created_at, updated_at
+           score, decision, decision_details, client_data, created_at, updated_at
     FROM applications
     WHERE profile_id = :profile_id
     ORDER BY id DESC
@@ -195,6 +195,7 @@ CREATE_APPLICATIONS_TABLE = """
         score REAL,
         decision TEXT,
         decision_details TEXT,
+        client_data TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )

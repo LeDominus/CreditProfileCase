@@ -17,7 +17,7 @@ class LoadProduct:
 
 
 class RecommendationRequest(BaseModel):
-    """Профиль бизнеса для подбора продуктов: все поля опциональны"""
+    """Профиль бизнеса для подбора продуктов"""
     model_config = ConfigDict(extra="ignore")
 
     business_name: str | None = None

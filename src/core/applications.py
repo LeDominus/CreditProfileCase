@@ -40,7 +40,8 @@ class ApplicationRepository:
                     "status": application.status,
                     "score": application.score,
                     "decision": application.decision,
-                    "decision_details": self._dump_details(application.decision_details),
+                    "decision_details": self._dump_json(application.decision_details),
+                    "client_data": self._dump_json(application.client_data),
                     "created_at": application.created_at.isoformat(),
                     "updated_at": application.updated_at.isoformat(),
                 },
@@ -77,7 +78,7 @@ class ApplicationRepository:
                     "status": application.status,
                     "score": application.score,
                     "decision": application.decision,
-                    "decision_details": self._dump_details(application.decision_details),
+                    "decision_details": self._dump_json(application.decision_details),
                     "updated_at": application.updated_at.isoformat(),
                     "id": application.id,
                 },
@@ -150,10 +151,16 @@ class ApplicationRepository:
         ]
 
     @staticmethod
-    def _dump_details(decision_details: dict | None) -> str | None:
-        if decision_details is None:
+    def _dump_json(value: dict | None) -> str | None:
+        if value is None:
             return None
-        return json.dumps(decision_details, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _load_json(value: str | None) -> dict | None:
+        if not value:
+            return None
+        return json.loads(value)
 
     @staticmethod
     def _row_to_application(row: dict) -> Application:
@@ -171,7 +178,8 @@ class ApplicationRepository:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             score=row["score"],
             decision=row["decision"],
-            decision_details=json.loads(row["decision_details"]) if row["decision_details"] else None,
+            decision_details=ApplicationRepository._load_json(row["decision_details"]),
+            client_data=ApplicationRepository._load_json(row["client_data"]),
             id=row["id"],
         )
 

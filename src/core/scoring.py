@@ -127,9 +127,9 @@ def score_application(
 
     factors = [
         _factor("business_age", f"{age} мес", min(age / BUSINESS_AGE_FULL_MONTHS, 1.0)),
-        _factor("margin", f"{margin * 100:.1f}%", clamp(margin / MARGIN_FULL_RATIO)),
-        _factor("payment_burden", f"{burden * 100:.1f}% выручки", clamp((burden_pivot - burden) / burden_span)),
-        _factor("amount_coverage", f"{coverage:.2f} годовой выручки", clamp((coverage_pivot - coverage) / coverage_span)),
+        _factor("margin", f"{margin * 100:.1f}%", clamp(margin / MARGIN_FULL_RATIO, CLAMP_LOW, CLAMP_HIGH)),
+        _factor("payment_burden", f"{burden * 100:.1f}% выручки", clamp((burden_pivot - burden) / burden_span, CLAMP_LOW, CLAMP_HIGH)),
+        _factor("amount_coverage", f"{coverage:.2f} годовой выручки", clamp((coverage_pivot - coverage) / coverage_span, CLAMP_LOW, CLAMP_HIGH)),
     ]
 
     score = round(clamp(SCORING_BASE + sum(f["contribution"] for f in factors), 0.0, 100.0), 2)

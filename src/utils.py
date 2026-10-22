@@ -40,6 +40,7 @@ def application_response(application: Application) -> dict:
         "score": application.score,
         "decision": application.decision,
         "decision_details": application.decision_details,
+        "client_data": application.client_data,
         "created_at": application.created_at.isoformat(),
         "updated_at": application.updated_at.isoformat(),
     }

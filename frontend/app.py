@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.core.scoring import score_application
 from src.core.alternatives import suggest_alternative_products
 from src.core.calc_payment import calculate_annuity_payment
+from src.core.registry import get_registry_entry
 
 PRODUCTS = [
     {
@@ -77,6 +78,18 @@ PRODUCTS = [
         "description": "Небольшая сумма и короткий срок финансирования.",
     },
 ]
+
+CREDIT_PRODUCT_BY_ID = {
+    1: "оборотный кредит",
+    2: "инвестиционный кредит",
+    3: "инвестиционный кредит",
+    4: "оборотный кредит",
+}
+
+TAXATION_SYSTEMS = ("ОСНО", "УСН доходы", "УСН доходы минус расходы", "ПСН", "ЕСХН")
+
+# загруженные клиентом документы сохраняются на диск при отправке заявки
+UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads"
 
 st.set_page_config(
     page_title="Кредитный помощник ММБ",
@@ -393,18 +406,22 @@ def api_get_products() -> list:
     return api_request("GET", "/api/products")
 
 
-def api_create_application(profile_id, product_id, amount, term) -> dict:
+def api_get_registry(inn: str) -> dict:
+    """GET /api/registry/{inn} — данные компании и руководителя по ИНН из реестра."""
+    return api_request("GET", f"/api/registry/{inn}")
+
+
+def api_create_application(profile_id, product_id, amount, term, client_data=None) -> dict:
     """POST /api/applications — создать заявку на backend."""
-    return api_request(
-        "POST",
-        "/api/applications",
-        json={
-            "profile_id": profile_id,
-            "product_id": product_id,
-            "requested_amount": amount,
-            "term_months": term,
-        },
-    )
+    payload = {
+        "profile_id": profile_id,
+        "product_id": product_id,
+        "requested_amount": amount,
+        "term_months": term,
+    }
+    if client_data is not None:
+        payload["client_data"] = client_data
+    return api_request("POST", "/api/applications", json=payload)
 
 
 def api_score_application(application_id) -> dict:
@@ -489,6 +506,7 @@ def init_state():
         "api_available": False,
         "api_checked": False,
         "backend_profile_id": None,
+        "registry_entry": None,
         "products": None,
         "awaiting_reply": False,
         "selection_unlocked": False,
@@ -654,7 +672,7 @@ def run_local_scoring(product, amount, term, monthly):
     return result.to_dict()
 
 
-def submit_application(product, amount, term):
+def submit_application(product, amount, term, client_data=None):
     """Создание черновика заявки: консультация -> профиль -> черновик (без скоринга)."""
     monthly, total, overpayment = payment_calculation(amount, product["rate"], term)
     application_id = str(uuid.uuid4())[:8].upper()
@@ -662,7 +680,7 @@ def submit_application(product, amount, term):
         try:
             profile_id = ensure_backend_profile()
             created = api_create_application(
-                profile_id, product["id"], int(amount), int(term)
+                profile_id, product["id"], int(amount), int(term), client_data
             )
             application = created.get("application") or {}
             application_id = application.get("id", application_id)
@@ -686,6 +704,7 @@ def submit_application(product, amount, term):
         "status": status,
         "score": None,
         "decision_details": {},
+        "client_data": client_data,
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
     st.session_state.applications.insert(0, application_record)
@@ -961,6 +980,303 @@ def rescore_application(application):
     )
     st.session_state.messages.append({"role": "assistant", "content": explanation})
     return True
+
+
+def lookup_registry(inn):
+    """Запись реестра по ИНН: live — через backend, демо — локальный мок."""
+    if not inn:
+        st.warning("Введите ИНН компании.")
+        return None
+    if not DEMO_MODE:
+        try:
+            return api_get_registry(inn)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                st.warning(f"Компания с ИНН {inn} не найдена в реестре. Проверьте ИНН.")
+            else:
+                st.error(f"Реестр недоступен: {exc}")
+            return None
+        except requests.RequestException as exc:
+            st.error(f"Реестр недоступен: {exc}")
+            return None
+    entry = get_registry_entry(inn)
+    if entry is None:
+        st.warning(f"Компания с ИНН {inn} не найдена в реестре. Проверьте ИНН.")
+    return entry
+
+
+def split_lines(value):
+    """Многострочное поле в список непустых строк."""
+    return [line.strip() for line in str(value or "").splitlines() if line.strip()]
+
+
+CLIENT_DATA_REQUIRED_FIELDS = {
+    "cd_company_place": "адрес ведения бизнеса",
+    "cd_company_phone": "телефон компании",
+    "cd_company_email": "e-mail компании",
+    "cd_passport": "паспорт руководителя",
+    "cd_passport_issued_by": "кем выдан паспорт",
+    "cd_place_of_birth": "дата и место рождения",
+    "cd_registration_address": "адрес регистрации руководителя",
+    "cd_inn_fiz": "ИНН руководителя",
+    "cd_supervisor_phone": "мобильный телефон руководителя",
+    "cd_supervisor_email": "e-mail руководителя",
+}
+
+
+def missing_client_data_fields(state=None):
+    """Незаполненные обязательные поля пакета данных клиента (форма и проверка при отправке)."""
+    state = st.session_state if state is None else state
+    missing = []
+    if state.get("registry_entry") is None:
+        missing.append("ИНН компании (найдите компанию по ИНН)")
+    missing.extend(
+        label
+        for key, label in CLIENT_DATA_REQUIRED_FIELDS.items()
+        if not str(state.get(key) or "").strip()
+    )
+    if state.get("cd_revenue") is None or state.get("cd_profit") is None:
+        missing.append("выручка и прибыль за последний год")
+    if not state.get("cd_consent_pd"):
+        missing.append("согласие на обработку персональных данных")
+    if not state.get("cd_consent_credit"):
+        missing.append("согласие на запрос кредитной истории")
+    return missing
+
+
+def save_uploaded_documents(inn, passport_scan, business_docs):
+    """Сохраняет загруженные документы в uploads/{inn}/, возвращает имена файлов."""
+    uploads = []
+    if passport_scan is not None:
+        uploads.append(passport_scan)
+    uploads.extend(business_docs or [])
+    if not uploads:
+        return "", []
+    target_dir = UPLOAD_DIR / (inn or "unknown")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved = [Path(item.name).name for item in uploads]
+    for uploaded, name in zip(uploads, saved):
+        (target_dir / name).write_bytes(uploaded.getvalue())
+    if passport_scan is not None:
+        return saved[0], saved[1:]
+    return "", saved
+
+
+def apply_registry_entry(entry):
+    """Переносит запись реестра в поля формы (вызывать до отрисовки виджетов)."""
+    company = entry.get("company") or {}
+    supervisor = entry.get("supervisor") or {}
+    finance = entry.get("finance") or {}
+    taxation = company.get("taxation_system")
+    st.session_state.cd_company_place = company.get("company_place", "")
+    st.session_state.cd_taxation_system = (
+        taxation if taxation in TAXATION_SYSTEMS else TAXATION_SYSTEMS[0]
+    )
+    st.session_state.cd_members_count = int(company.get("company_members_count") or 1)
+    st.session_state.cd_company_phone = company.get("company_phone", "")
+    st.session_state.cd_company_email = company.get("company_email", "")
+    st.session_state.cd_passport = supervisor.get("passport", "")
+    st.session_state.cd_passport_issued_by = supervisor.get("passport_issued_by", "")
+    st.session_state.cd_place_of_birth = supervisor.get("place_of_birth", "")
+    st.session_state.cd_registration_address = supervisor.get("registration_address", "")
+    st.session_state.cd_inn_fiz = supervisor.get("inn_fiz_face", "")
+    st.session_state.cd_supervisor_phone = supervisor.get("supervisor_phone", "")
+    st.session_state.cd_supervisor_email = supervisor.get("supervisor_email", "")
+    st.session_state.cd_owners_names = "\n".join(supervisor.get("owners_full_name") or [])
+    st.session_state.cd_owners_passports = "\n".join(supervisor.get("owners_passport") or [])
+    st.session_state.cd_revenue = float(finance.get("revenue") or 0.0)
+    st.session_state.cd_profit = float(finance.get("profit") or 0.0)
+    st.session_state.cd_loans = "\n".join(finance.get("current_loans_and_leasing") or [])
+    st.session_state.cd_has_debts = bool(finance.get("has_debts"))
+
+
+@st.dialog("Данные для заявки", width="large", dismissible=False)
+def client_data_dialog():
+    """Отдельное окно: полный пакет данных клиента по PDF «Что запрашиваем у клиента».
+
+    Окно нельзя закрыть крестиком или ESC — только кнопкой «Подтвердить данные»,
+    которая проверяет обязательные поля (см. missing_client_data_fields).
+    """
+    st.session_state.cd_confirmed = False
+    st.caption(
+        "Введите ИНН — компания, руководитель и финансы заполнятся автоматически из реестра. "
+        "Проверьте данные, загрузите документы и отметьте согласия."
+    )
+    st.text_input("ИНН компании", key="cd_inn", placeholder="10 цифр — ООО, 12 цифр — ИП")
+    if st.button("Заполнить по ИНН", key="cd_lookup", use_container_width=True):
+        entry = lookup_registry(st.session_state.get("cd_inn", "").strip())
+        st.session_state.registry_entry = entry
+        if entry is not None:
+            apply_registry_entry(entry)
+    entry = st.session_state.registry_entry
+    if entry is not None:
+        company = entry.get("company") or {}
+        st.success(
+            f"Данные заполнены из реестра: {company.get('company_name', '')} · "
+            f"руководитель: {(entry.get('supervisor') or {}).get('full_name', '')}"
+        )
+    st.markdown('<div class="panel-title" style="margin-top:6px">О компании</div>', unsafe_allow_html=True)
+    st.text_input("Где фактически ведётся бизнес", key="cd_company_place", placeholder="Город, адрес")
+    st.selectbox("Система налогообложения", TAXATION_SYSTEMS, key="cd_taxation_system")
+    st.number_input("Число сотрудников", min_value=1, step=1, key="cd_members_count")
+    st.text_input("Телефон компании", key="cd_company_phone", placeholder="+79991234567")
+    st.text_input("E-mail компании", key="cd_company_email", placeholder="info@company.ru")
+    st.markdown('<div class="panel-title" style="margin-top:6px">О руководителе</div>', unsafe_allow_html=True)
+    st.text_input("Паспорт (серия, номер)", key="cd_passport", placeholder="4509 123456")
+    st.text_input("Кем и когда выдан паспорт", key="cd_passport_issued_by")
+    st.text_input("Дата и место рождения", key="cd_place_of_birth", placeholder="01.01.1980, г. Москва")
+    st.text_input("Адрес регистрации", key="cd_registration_address")
+    st.text_input("ИНН руководителя (физического лица)", key="cd_inn_fiz", placeholder="12 цифр")
+    st.text_input("Мобильный телефон руководителя", key="cd_supervisor_phone", placeholder="+79991234568")
+    st.text_input("E-mail руководителя", key="cd_supervisor_email")
+    if entry is not None and len(entry.get("inn", "")) == 10:
+        st.caption("Владельцы с долей более 25% (для ООО) — по одному в строке.")
+        st.text_area("ФИО владельцев", key="cd_owners_names", placeholder="Иванов Иван Иванович")
+        st.text_area("Паспорта владельцев", key="cd_owners_passports", placeholder="4509 654321")
+    st.markdown('<div class="panel-title" style="margin-top:6px">О финансах</div>', unsafe_allow_html=True)
+    st.number_input("Выручка за последний год, ₽", min_value=0.0, step=100_000.0, value=None, placeholder="Например, 48000000", key="cd_revenue")
+    st.number_input("Прибыль за последний год, ₽", min_value=0.0, step=100_000.0, value=None, placeholder="Например, 6000000", key="cd_profit")
+    st.text_area("Текущие кредиты и лизинг (банк, остаток, платёж — по одному в строке)", key="cd_loans", placeholder="Альфа-Банк, остаток 500000, платёж 60000")
+    st.checkbox("Есть долги по налогам и зарплате", key="cd_has_debts")
+    st.markdown('<div class="panel-title" style="margin-top:6px">Документы</div>', unsafe_allow_html=True)
+    st.file_uploader("Скан паспорта руководителя", key="cd_passport_scan")
+    st.file_uploader("Декларация ИП или устав и отчётность ООО, счёт или договор", accept_multiple_files=True, key="cd_business_docs")
+    st.markdown('<div class="panel-title" style="margin-top:6px">Согласия</div>', unsafe_allow_html=True)
+    st.checkbox("Согласие на обработку персональных данных", key="cd_consent_pd")
+    st.checkbox("Согласие на запрос кредитной истории", key="cd_consent_credit")
+    st.caption(
+        "Окно закрывается только кнопкой «Подтвердить данные» — после заполнения "
+        "обязательных полей и отметки обоих согласий."
+    )
+    if st.button("Подтвердить данные", type="primary", use_container_width=True, key="cd_confirm"):
+        missing = missing_client_data_fields()
+        if missing:
+            st.error(
+                "Не заполнены обязательные поля: "
+                + ", ".join(missing)
+                + ". Заполните их и нажмите «Подтвердить данные» ещё раз."
+            )
+        else:
+            st.session_state.cd_confirmed = True
+            st.rerun()
+
+
+@st.dialog("Заявка принята", width="large", icon="✅", on_dismiss="rerun")
+def application_accepted_dialog(application):
+    """Отдельное окно: заявка отправлена — итоги и следующий шаг."""
+    st.success("Ваша заявка принята. Данные направлены в банк.")
+    status_key = application.get("status", "draft")
+    status_label, status_icon = STATUS_LABELS.get(status_key, ("Получена", "🔵"))
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Сумма заявки", money(application.get("amount")))
+    col_b.metric("Срок", f"{application.get('term')} мес")
+    col_c.metric("Платёж в месяц", money(application.get("monthly_payment")))
+    st.markdown(
+        f"**Продукт:** {application.get('product_name', 'Заявка')} · "
+        f"**№ заявки:** {application.get('id')} · "
+        f"**Статус:** {status_icon} {status_label}"
+    )
+    if status_key == "draft":
+        st.info(
+            "Заявка сохранена как черновик. Отправьте её на обработку "
+            "в разделе «Мои заявки», когда будете готовы."
+        )
+    st.caption(
+        "Отправка заявки не означает одобрение кредита. В демо-режиме статус "
+        "назначается автоматически и не отражает решение банка."
+    )
+    if st.button("Понятно", type="primary", use_container_width=True):
+        st.rerun()
+
+
+def render_client_data_summary():
+    """Компактный блок на странице заявки + кнопка открытия формы в отдельном окне."""
+    st.markdown(
+        '<div class="panel-title" style="margin-top:10px">Данные для заявки</div>'
+        '<div class="panel-sub">Полный пакет данных клиента: компания, руководитель, финансы, '
+        'документы, согласия. Заполняется в отдельном окне.</div>',
+        unsafe_allow_html=True,
+    )
+    entry = st.session_state.registry_entry
+    if entry is not None:
+        company = entry.get("company") or {}
+        st.success(
+            f"Реестр: {company.get('company_name', '')} (ИНН {entry.get('inn', '')}) — "
+            "данные заполнены автоматически."
+        )
+    else:
+        st.info("Данные не заполнены: откройте форму и введите ИНН компании из тестового реестра.")
+    if bool(st.session_state.get("cd_confirmed")):
+        st.success("Данные проверены и подтверждены — можно отправлять заявку.")
+    else:
+        missing = missing_client_data_fields()
+        if missing:
+            st.warning("Обязательные поля не заполнены: " + ", ".join(missing) + ".")
+        else:
+            st.warning("Данные заполнены — откройте форму и нажмите «Подтвердить данные».")
+    if st.button("Заполнить данные для заявки", key="cd_open_form", use_container_width=True):
+        client_data_dialog()
+
+
+def collect_client_data(selected, amount, term):
+    """Пакет данных клиента для заявки из состояния виджетов формы."""
+    entry = st.session_state.registry_entry
+    if entry is None:
+        return None, "Введите ИНН компании в блоке «Данные для заявки» и заполните реквизиты."
+    state = st.session_state
+    inn = entry.get("inn", "")
+    missing = missing_client_data_fields()
+    if missing:
+        return None, "Заполните в блоке «Данные для заявки»: " + ", ".join(missing) + "."
+    passport_scan = state.get("cd_passport_scan")
+    business_docs = state.get("cd_business_docs") or []
+    passport_name, business_names = save_uploaded_documents(inn, passport_scan, business_docs)
+    client_data = {
+        "credit": {
+            "credit_product": CREDIT_PRODUCT_BY_ID.get(selected.get("id"), "оборотный кредит"),
+            "credit_sum": float(amount),
+            "credit_term_months": int(term),
+            "credit_target": st.session_state.profile.get("funding_purpose")
+            or selected.get("purpose", ""),
+        },
+        "company": {
+            "inn": inn,
+            **(entry.get("company") or {}),
+            "company_place": state.get("cd_company_place", "").strip(),
+            "taxation_system": state.get("cd_taxation_system"),
+            "company_members_count": int(state.get("cd_members_count") or 1),
+            "company_phone": state.get("cd_company_phone", "").strip(),
+            "company_email": state.get("cd_company_email", "").strip(),
+        },
+        "supervisor": {
+            "full_name": (entry.get("supervisor") or {}).get("full_name", ""),
+            "passport": state.get("cd_passport", "").strip(),
+            "passport_issued_by": state.get("cd_passport_issued_by", "").strip(),
+            "place_of_birth": state.get("cd_place_of_birth", "").strip(),
+            "registration_address": state.get("cd_registration_address", "").strip(),
+            "inn_fiz_face": state.get("cd_inn_fiz", "").strip(),
+            "supervisor_phone": state.get("cd_supervisor_phone", "").strip(),
+            "supervisor_email": state.get("cd_supervisor_email", "").strip(),
+            "owners_full_name": split_lines(state.get("cd_owners_names")) or None,
+            "owners_passport": split_lines(state.get("cd_owners_passports")) or None,
+        },
+        "finance": {
+            "revenue": float(state["cd_revenue"]),
+            "profit": float(state["cd_profit"]),
+            "current_loans_and_leasing": split_lines(state.get("cd_loans")) or None,
+            "has_debts": bool(state.get("cd_has_debts")),
+        },
+        "documents": {
+            "supervisor_passport_scan": passport_name,
+            "business_type": "ip" if len(inn) == 12 else "ooo",
+            "business_doc": business_names,
+        },
+        "consents": {
+            "personal_data_agreement": bool(state.get("cd_consent_pd")),
+            "credit_history_agreement": bool(state.get("cd_consent_credit")),
+        },
+    }
+    return client_data, None
 
 
 init_state()
@@ -1322,13 +1638,20 @@ with product_col:
             metric_c.metric("Переплата", money(overpayment))
             st.caption("Расчёт аннуитетный, ориентировочный. Не учитывает комиссии, страховку, нерегулярные даты платежей и досрочное погашение.")
             st.markdown('<div class="status-note">Отправка заявки не означает одобрение кредита. В демо-режиме статус назначается автоматически и не отражает решение банка.</div>', unsafe_allow_html=True)
+            render_client_data_summary()
+            consents_accepted = bool(st.session_state.get("cd_consent_pd")) and bool(
+                st.session_state.get("cd_consent_credit")
+            )
+            data_confirmed = bool(st.session_state.get("cd_confirmed"))
             confirmed = st.checkbox("Подтверждаю отправку заявки с указанными параметрами")
             confirm_col, cancel_col = st.columns(2)
             with confirm_col:
-                if st.button("Подтвердить и отправить", type="primary", use_container_width=True, disabled=not confirmed):
-                    if submit_application(selected, int(chosen_amount), int(chosen_term)):
-                        st.success("Демонстрационная заявка создана.")
-                        st.rerun()
+                if st.button("Подтвердить и отправить", type="primary", use_container_width=True, disabled=not (confirmed and consents_accepted and data_confirmed)):
+                    client_data, form_error = collect_client_data(selected, int(chosen_amount), int(chosen_term))
+                    if form_error:
+                        st.warning(form_error)
+                    elif submit_application(selected, int(chosen_amount), int(chosen_term), client_data):
+                        application_accepted_dialog(st.session_state.applications[0])
             with cancel_col:
                 if st.button("Отмена", use_container_width=True):
                     st.session_state.show_confirm = False
