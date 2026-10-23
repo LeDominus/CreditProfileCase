@@ -1,9 +1,9 @@
-"""Тесты стоп-факторов на этапе data_check: ликвидация и текущая просрочка (п. 2.6)."""
+﻿"""Тесты стоп-факторов на этапе data_check: ликвидация и текущая просрочка (п. 2.6)."""
 
 import pytest
 from fastapi.testclient import TestClient
 
-from src.config.registry import REGISTRY_ENTRIES
+from src.database.registry import REGISTRY_ENTRIES
 from src.core.scoring_service import process_application_scoring
 from src.core.stop_factors import (
     STOP_FACTOR_DEBTS,

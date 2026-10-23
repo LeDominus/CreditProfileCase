@@ -2,7 +2,7 @@
 import logging
 import re
 from dataclasses import asdict
-from src.config.prompt import TOOL_USE_PROMPT
+from src.config.prompt import DIALOGUE_RESPONSE_PROMPT
 from src.config.tools_config import (
     MAX_TOOL_CALLS,
     PAYMENT_TOOL_NAME,
@@ -14,8 +14,12 @@ from src.schemas.llm_schema import ToolExecution
 logger = logging.getLogger(__name__)
 
 
-def parse_tool_call(reply: str) -> dict | None:
-    """Разбор ответа LLM: возвращает вызов инструмента или None"""
+def parse_dialogue_response(reply: str) -> dict | None:
+    """Разбор merged-ответа LLM: JSON с profile_updates, tool и reply.
+
+    Возвращает dict или None, если ответ не является JSON-объектом
+    (модель нарушила формат — текст целиком уходит пользователю).
+    """
     if not reply:
         return None
     text = reply.strip()
@@ -30,15 +34,7 @@ def parse_tool_call(reply: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    tool = data.get("tool")
-    if not isinstance(tool, str) or not tool.strip():
-        return None
-    arguments = data.get("arguments")
-    if arguments is None:
-        arguments = {}
-    if not isinstance(arguments, dict):
-        return None
-    return {"tool": tool.strip(), "arguments": arguments}
+    return data
 
 
 def execute_tool(tool_call: dict) -> ToolExecution:
@@ -101,23 +97,46 @@ def format_tool_result(result: ToolExecution) -> str:
     )
 
 
-def run_with_tools(llm, context: list[dict], max_tool_calls: int | None = None) -> str:
-    """Диалоговый цикл с инструментами: LLM оркестрирует, код считает"""
+def run_dialogue(
+    llm, context: list[dict], max_tool_calls: int | None = None
+) -> dict:
+    """Единый диалоговый цикл: извлечение полей + ответ + инструменты.
+
+    Модель отвечает merged-JSON (profile_updates + tool + reply) одним
+    запросом. Возвращает {"reply": str, "profile_updates": dict, "parsed": bool};
+    при parsed=False модель ответила текстом вне формата.
+    """
     limit = MAX_TOOL_CALLS if max_tool_calls is None else max_tool_calls
     messages = [dict(message) for message in context]
     if messages and messages[0].get("role") == "system":
         messages[0] = {
             **messages[0],
-            "content": f"{messages[0]['content']}{TOOL_USE_PROMPT}",
+            "content": f"{messages[0]['content']}{DIALOGUE_RESPONSE_PROMPT}",
         }
 
+    profile_updates: dict = {}
     last_result: ToolExecution | None = None
     calls_made = 0
     while True:
         reply = llm.complete(messages)
-        tool_call = parse_tool_call(reply)
-        if tool_call is None:
-            return reply
+        data = parse_dialogue_response(reply)
+        if data is None:
+            return {"reply": reply, "profile_updates": {}, "parsed": False}
+        updates = data.get("profile_updates")
+        if isinstance(updates, dict):
+            profile_updates.update(updates)
+        tool = data.get("tool")
+        if not (isinstance(tool, str) and tool.strip()):
+            return {
+                "reply": str(data.get("reply") or ""),
+                "profile_updates": profile_updates,
+                "parsed": True,
+            }
+        arguments = data.get("arguments")
+        tool_call = {
+            "tool": tool.strip(),
+            "arguments": arguments if isinstance(arguments, dict) else {},
+        }
         if calls_made >= limit:
             logger.warning(
                 "Инструменты: достигнут лимит вызовов (%d) — "
@@ -145,5 +164,9 @@ def run_with_tools(llm, context: list[dict], max_tool_calls: int | None = None) 
             }
         )
     if last_result is not None:
-        return format_tool_result(last_result)
-    return reply
+        return {
+            "reply": format_tool_result(last_result),
+            "profile_updates": profile_updates,
+            "parsed": True,
+        }
+    return {"reply": "", "profile_updates": profile_updates, "parsed": True}
