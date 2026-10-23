@@ -1,5 +1,7 @@
 """Интеграционные тесты HTTP API: TestClient + временная SQLite + стаб LLM."""
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -245,6 +247,52 @@ class TestMessagesPipeline:
         assert first["monthly_payment"] > 0
         assert first["overpayment"] > 0
 
+    def test_pipeline_merged_single_request(self, client):
+        """Модель ответила merged-JSON: извлечение и ответ за один запрос LLM."""
+        client.app.state.llmAPI.chat_answer = json.dumps(
+            {
+                "profile_updates": {
+                    "requested_amount": 2_000_000,
+                    "preferred_term_months": 18,
+                },
+                "tool": None,
+                "arguments": None,
+                "reply": "Отлично! Подскажите срок работы бизнеса.",
+            },
+            ensure_ascii=False,
+        )
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        profile_id = client.post(
+            "/api/profile",
+            json={
+                "industry": "общепит",
+                "funding_purpose": "Пополнение оборотных средств",
+                "requested_amount": 1_500_000,
+                "business_age_months": 24,
+                "monthly_revenue": 2_000_000,
+                "monthly_profit": 300_000,
+                "preferred_term_months": 24,
+            },
+        ).json()["id"]
+
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={
+                "role": "user",
+                "content": "Нужно 2 миллиона на 18 месяцев",
+                "profile_id": profile_id,
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["reply"] == "Отлично! Подскажите срок работы бизнеса."
+        assert body["profile_updates"] == {
+            "requested_amount": 2_000_000.0,
+            "preferred_term_months": 18,
+        }
+        # один запрос к LLM: формат соблюдён, запасное извлечение не потребовалось
+        assert len(client.app.state.llmAPI.requests) == 1
+
     def test_no_recommendations_until_required_fields_complete(self, client):
         """Подбор закрыт, пока ассистент не собрал обязательные параметры бизнеса."""
         conversation_id = client.post("/api/conversations", json={}).json()["id"]
@@ -349,6 +397,16 @@ class TestProfile:
         assert patched.json()["requested_amount"] == 3_000_000
         # непереданные поля не затёрты
         assert patched.json()["industry"] == "общепит"
+
+    def test_create_profile_without_optional_fields(self, client):
+        """Профиль создаётся при первом сообщении — сумма и срок ещё не названы."""
+        created = client.post(
+            "/api/profile",
+            json={"industry": "IT", "funding_purpose": "Развитие"},
+        )
+        assert created.status_code == 201
+        assert created.json()["preferred_term_months"] is None
+        assert created.json()["requested_amount"] is None
 
     def test_patch_empty_body_returns_current(self, client):
         profile_id = client.post(

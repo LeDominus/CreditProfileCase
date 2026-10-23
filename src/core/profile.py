@@ -3,6 +3,7 @@ from src.database.database import DatabaseConnector
 from src.schemas.profile_schema import BusinessProfile
 from src.config.sql_queries import (
     CREATE_PROFILE_QUERY,
+    GET_LATEST_PROFILE_BY_USER_QUERY,
     GET_PROFILE_QUERY,
     UPDATE_PROFILE_QUERY,
 )
@@ -42,22 +43,18 @@ class ProfileRepository:
             )
         if not rows:
             return None
-        row = rows[0]
-        return BusinessProfile(
-            user_id=row["user_id"],
-            business_name=row["business_name"],
-            industry=row["industry"],
-            funding_purpose=row["funding_purpose"],
-            requested_amount=row["requested_amount"],
-            business_age_months=row["business_age_months"],
-            monthly_revenue=row["monthly_revenue"],
-            monthly_profit=row["monthly_profit"],
-            preferred_term_months=row["preferred_term_months"],
-            max_monthly_payment=row["max_monthly_payment"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            id=row["id"],
-        )
+        return self._row_to_profile(rows[0])
+
+    def get_latest_profile_by_user(self, user_id: int) -> BusinessProfile | None:
+        """Последний профиль пользователя (для восстановления сессии на клиенте)."""
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_LATEST_PROFILE_BY_USER_QUERY,
+                parameters={"user_id": user_id}
+            )
+        if not rows:
+            return None
+        return self._row_to_profile(rows[0])
 
     def update_profile(self, profile: BusinessProfile) -> int | None:
         """Обновление записи профиля в БД. Возвращает id профиля, None — если профиль не найден."""
@@ -81,3 +78,21 @@ class ProfileRepository:
                 }
             )
         return profile.id
+
+    @staticmethod
+    def _row_to_profile(row) -> BusinessProfile:
+        return BusinessProfile(
+            user_id=row["user_id"],
+            business_name=row["business_name"],
+            industry=row["industry"],
+            funding_purpose=row["funding_purpose"],
+            requested_amount=row["requested_amount"],
+            business_age_months=row["business_age_months"],
+            monthly_revenue=row["monthly_revenue"],
+            monthly_profit=row["monthly_profit"],
+            preferred_term_months=row["preferred_term_months"],
+            max_monthly_payment=row["max_monthly_payment"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            id=row["id"],
+        )

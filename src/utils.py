@@ -14,11 +14,6 @@ from src.config.llm_config import PROFILE_FIELDS
 from src.schemas.profile_schema import BusinessProfile
 
 
-FALLBACK_REPLY = (
-    "Сообщение принято. Ассистент временно недоступен — "
-    "продолжу помогать, как только связь восстановится."
-)
-
 def get_product(product_id: int) -> dict | None:
     """Продукт из каталога по id."""
     return next((p for p in PRODUCTS if p["id"] == product_id), None)
@@ -40,6 +35,7 @@ def application_response(application: Application) -> dict:
         "score": application.score,
         "decision": application.decision,
         "decision_details": application.decision_details,
+        "client_data": application.client_data,
         "created_at": application.created_at.isoformat(),
         "updated_at": application.updated_at.isoformat(),
     }
@@ -147,3 +143,6 @@ def setup_logging(log_dir: str | Path | None = None) -> Path:
         console_handler.setFormatter(formatter)
         root.addHandler(console_handler)
     return log_file
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))

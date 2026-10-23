@@ -2,6 +2,7 @@
 MIGRATIONS = (
     "ALTER TABLE conversations ADD COLUMN user_id INTEGER",
     "ALTER TABLE business_profiles ADD COLUMN user_id INTEGER",
+    "ALTER TABLE applications ADD COLUMN client_data TEXT",
 )
 
 

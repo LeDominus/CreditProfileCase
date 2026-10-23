@@ -1,22 +1,20 @@
 import json
 from datetime import datetime, timezone
-
 from src.config.sql_queries import (
     CREATE_APPLICATION_QUERY,
     CREATE_APPLICATION_STATUS_HISTORY_QUERY,
+    GET_ALL_APPLICATIONS_QUERY,
     GET_APPLICATION_QUERY,
+    GET_APPLICATIONS_BY_STATUS_QUERY,
     GET_APPLICATION_STATUS_HISTORY_QUERY,
     GET_PROFILE_APPLICATIONS_QUERY,
+    GET_USER_APPLICATIONS_QUERY,
     UPDATE_APPLICATION_DETAILS_QUERY,
     UPDATE_APPLICATION_QUERY,
 )
 from src.database.database import DatabaseConnector
 from src.exceptions import ApplicationNotFoundError, InvalidApplicationStatusError
 from src.schemas.application_schema import Application, can_transition
-
-
-ACTOR_SYSTEM = "system"
-ACTOR_CLIENT = "client"
 
 
 class ApplicationRepository:
@@ -40,7 +38,8 @@ class ApplicationRepository:
                     "status": application.status,
                     "score": application.score,
                     "decision": application.decision,
-                    "decision_details": self._dump_details(application.decision_details),
+                    "decision_details": self._dump_json(application.decision_details),
+                    "client_data": self._dump_json(application.client_data),
                     "created_at": application.created_at.isoformat(),
                     "updated_at": application.updated_at.isoformat(),
                 },
@@ -66,6 +65,31 @@ class ApplicationRepository:
             )
         return [self._row_to_application(row) for row in rows]
 
+    def get_applications_by_user(self, user_id: int) -> list[Application]:
+        """Все заявки пользователя (по всем его профилям), новые сверху"""
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_USER_APPLICATIONS_QUERY,
+                parameters={"user_id": user_id},
+            )
+        return [self._row_to_application(row) for row in rows]
+
+    def get_all_applications(self, status: str | None = None) -> list[Application]:
+        """Все заявки (очередь сотрудника банка), новые сверху.
+
+        status — опциональный фильтр по статусу заявки.
+        """
+        if status is None:
+            with self.dbConn as conn:
+                rows = conn.read_data(sqlQuery=GET_ALL_APPLICATIONS_QUERY)
+            return [self._row_to_application(row) for row in rows]
+        with self.dbConn as conn:
+            rows = conn.read_data(
+                sqlQuery=GET_APPLICATIONS_BY_STATUS_QUERY,
+                parameters={"status": status},
+            )
+        return [self._row_to_application(row) for row in rows]
+
     def update_application(self, application: Application) -> int | None:
         """Обновление статуса и результата скоринга"""
         if application.id is None or self.get_application(application.id) is None:
@@ -77,7 +101,7 @@ class ApplicationRepository:
                     "status": application.status,
                     "score": application.score,
                     "decision": application.decision,
-                    "decision_details": self._dump_details(application.decision_details),
+                    "decision_details": self._dump_json(application.decision_details),
                     "updated_at": application.updated_at.isoformat(),
                     "id": application.id,
                 },
@@ -150,10 +174,16 @@ class ApplicationRepository:
         ]
 
     @staticmethod
-    def _dump_details(decision_details: dict | None) -> str | None:
-        if decision_details is None:
+    def _dump_json(value: dict | None) -> str | None:
+        if value is None:
             return None
-        return json.dumps(decision_details, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _load_json(value: str | None) -> dict | None:
+        if not value:
+            return None
+        return json.loads(value)
 
     @staticmethod
     def _row_to_application(row: dict) -> Application:
@@ -171,7 +201,8 @@ class ApplicationRepository:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             score=row["score"],
             decision=row["decision"],
-            decision_details=json.loads(row["decision_details"]) if row["decision_details"] else None,
+            decision_details=ApplicationRepository._load_json(row["decision_details"]),
+            client_data=ApplicationRepository._load_json(row["client_data"]),
             id=row["id"],
         )
 

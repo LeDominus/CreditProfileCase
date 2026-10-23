@@ -1,7 +1,5 @@
-﻿from src.config.products import PRODUCTS
+﻿from src.config.products import MAX_RECOMMEND_PRODUCTS, PRODUCTS
 from src.core.calc_payment import calculate_annuity_payment
-
-MAX_RECOMMEND_PRODUCTS = 3
 
 def recommend_products(
     profile: dict,

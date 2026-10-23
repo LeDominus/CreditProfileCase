@@ -2,17 +2,15 @@ import json
 import logging
 import re
 from src.config.prompt import PROFILE_EXTRACTION_PROMPT
-from src.config.llm_config import PROFILE_FIELDS
+from src.config.llm_config import (
+    DURATION_MONTH_FIELDS,
+    EXTRACTION_TEMPERATURE,
+    MODEL_EXTRACTION,
+    PROFILE_FIELDS,
+)
 from src.core.llm.LLMApi import LLMApi
 
 logger = logging.getLogger(__name__)
-
-# Температура извлечения полей: 0.15 — при 0.0 ответы слишком сухие
-# (не зависит от env TEMPERATURE, чтобы поведение было детерминированным)
-EXTRACTION_TEMPERATURE = 0.15
-
-# Поля-длительности в месяцах: LLM может вернуть их строкой («2 года», «18 мес»)
-DURATION_MONTH_FIELDS = ("business_age_months", "preferred_term_months")
 
 # Разговорные дробные числа («полтора года»)
 _FRACTION_YEARS = {"полтора": 1.5, "полторы": 1.5}
@@ -71,7 +69,10 @@ def extract_profile_fields(
     logger.info("Извлечение полей профиля: отправка запроса к LLM…")
     try:
         raw_answer = llm.complete(
-            context, temperature=EXTRACTION_TEMPERATURE, reasoning_effort="none"
+            context,
+            temperature=EXTRACTION_TEMPERATURE,
+            reasoning_effort="low",
+            model=MODEL_EXTRACTION,
         )
     except Exception as exc:
         logger.warning("Извлечение полей профиля: LLM недоступна (%s)", exc)
@@ -99,6 +100,11 @@ def parse_profile_fields(raw_answer: str) -> dict:
         data = json.loads(match.group(0))
     except json.JSONDecodeError:
         return {}
+    return validate_profile_fields(data)
+
+
+def validate_profile_fields(data) -> dict:
+    """Валидация полей профиля из dict (ответ извлекателя или диалоговой модели)"""
     if not isinstance(data, dict):
         return {}
     result = {}
@@ -111,8 +117,6 @@ def parse_profile_fields(raw_answer: str) -> dict:
                 result[key] = float(value)
             elif expected_type is int:
                 if key in DURATION_MONTH_FIELDS:
-                    # LLM иногда возвращает сроки строкой («2 года») —
-                    # переводим в месяцы, иначе поле молча терялось
                     months = parse_duration_months(value)
                     if months is not None:
                         result[key] = months

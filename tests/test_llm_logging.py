@@ -1,8 +1,12 @@
-"""Тесты логирования запросов к LLM: отправка → ответ/ошибка."""
+﻿"""Тесты логирования запросов к LLM: отправка → ответ/ошибка."""
 
 import logging
 from types import SimpleNamespace
 
+import pytest
+from openai import APIConnectionError, APITimeoutError
+
+from src.config.llm_config import MODEL_EXTRACTION
 from src.core.llm.LLMApi import LLMApi
 
 
@@ -20,6 +24,8 @@ class _FakeCompletions:
             raise self.error
         if self.responses is not None:
             response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
         else:
             response = SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=self.answer))]
@@ -102,10 +108,10 @@ class TestLLMRequestLogging:
         """reasoning_effort уходит в запрос через extra_body."""
         llm = _make_llm(answer="Ответ")
         llm.complete(
-            [{"role": "user", "content": "Привет"}], reasoning_effort="none"
+            [{"role": "user", "content": "Привет"}], reasoning_effort="medium"
         )
         call = llm.client.chat.completions.calls[0]
-        assert call["extra_body"] == {"reasoning_effort": "none"}
+        assert call["extra_body"] == {"reasoning_effort": "medium"}
 
     def test_complete_without_reasoning_effort_uses_config_default(self):
         """Без явного reasoning_effort используется значение из конфига."""
@@ -129,3 +135,83 @@ class TestLLMRequestLogging:
         assert "отправка запроса" in caplog.text
         assert "gpt://" not in caplog.text
         assert "test-folder" not in caplog.text
+
+
+def _response(text):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=text), finish_reason="stop"
+            )
+        ]
+    )
+
+
+class TestLLMFallback:
+    def test_timeout_switches_to_fallback_model(self):
+        llm = _make_llm(responses=[APITimeoutError(None), _response("Ответ fallback")])
+        llm.fallback_model_uri = "gpt://test-folder/fallback-model"
+        answer = llm.complete([{"role": "user", "content": "Привет"}])
+        assert answer == "Ответ fallback"
+        calls = llm.client.chat.completions.calls
+        assert len(calls) == 2
+        assert calls[0]["model"] == llm.model_uri
+        assert calls[1]["model"] == "gpt://test-folder/fallback-model"
+
+    def test_connection_error_switches_to_fallback_model(self):
+        llm = _make_llm(
+            responses=[APIConnectionError(message="net", request=None), _response("Ответ")]
+        )
+        llm.fallback_model_uri = "gpt://test-folder/fallback-model"
+        assert llm.complete([{"role": "user", "content": "Привет"}]) == "Ответ"
+
+    def test_no_fallback_configured_raises(self):
+        llm = _make_llm(responses=[APITimeoutError(None)])
+        llm.fallback_model_uri = None
+        with pytest.raises(RuntimeError):
+            llm.complete([{"role": "user", "content": "Привет"}])
+
+    def test_fallback_failure_raises(self):
+        llm = _make_llm(
+            responses=[APITimeoutError(None), APIConnectionError(message="net", request=None)]
+        )
+        llm.fallback_model_uri = "gpt://test-folder/fallback-model"
+        with pytest.raises(RuntimeError):
+            llm.complete([{"role": "user", "content": "Привет"}])
+
+    def test_non_api_error_does_not_switch_model(self):
+        llm = _make_llm(error=ValueError("bug"))
+        llm.fallback_model_uri = "gpt://test-folder/fallback-model"
+        with pytest.raises(RuntimeError):
+            llm.complete([{"role": "user", "content": "Привет"}])
+        assert len(llm.client.chat.completions.calls) == 1
+
+    def test_extraction_model_used_first(self):
+        llm = _make_llm(answer="Ответ")
+        llm.extraction_model_uri = "gpt://test-folder/extraction-model"
+        llm.complete(
+            [{"role": "user", "content": "Привет"}], model=MODEL_EXTRACTION
+        )
+        calls = llm.client.chat.completions.calls
+        assert len(calls) == 1
+        assert calls[0]["model"] == "gpt://test-folder/extraction-model"
+
+    def test_extraction_model_falls_back_to_main(self):
+        llm = _make_llm(responses=[APITimeoutError(None), _response("Ответ")])
+        llm.extraction_model_uri = "gpt://test-folder/extraction-model"
+        llm.fallback_model_uri = None
+        answer = llm.complete(
+            [{"role": "user", "content": "Привет"}], model=MODEL_EXTRACTION
+        )
+        assert answer == "Ответ"
+        calls = llm.client.chat.completions.calls
+        assert calls[0]["model"] == "gpt://test-folder/extraction-model"
+        assert calls[1]["model"] == llm.model_uri
+
+    def test_extraction_without_extraction_model_uses_main(self):
+        llm = _make_llm(answer="Ответ")
+        llm.extraction_model_uri = None
+        llm.complete(
+            [{"role": "user", "content": "Привет"}], model=MODEL_EXTRACTION
+        )
+        assert llm.client.chat.completions.calls[0]["model"] == llm.model_uri

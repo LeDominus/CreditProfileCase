@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from src.schemas.profile_schema import ClientDataRequest
 
 
 STATUS_DRAFT = "draft"  # черновик: заявка сохранена, не отправлена
@@ -39,7 +41,12 @@ APPLICATION_STATUSES = [
 ALLOWED_TRANSITIONS = {
     STATUS_DRAFT: {STATUS_SUBMITTED},
     STATUS_SUBMITTED: {STATUS_DATA_CHECK},
-    STATUS_DATA_CHECK: {STATUS_SCORING, STATUS_REJECTED, STATUS_NEEDS_INFO},
+    STATUS_DATA_CHECK: {
+        STATUS_SCORING,
+        STATUS_REJECTED,  # стоп-факторы (п. 2.6)
+        STATUS_NEEDS_INFO,
+        STATUS_MANUAL_REVIEW,  # передача аналитику менеджером (п. 2.5)
+    },
     STATUS_SCORING: {
         STATUS_APPROVED,
         STATUS_APPROVED_WITH_CHANGES,
@@ -52,6 +59,7 @@ ALLOWED_TRANSITIONS = {
         STATUS_APPROVED,
         STATUS_APPROVED_WITH_CHANGES,
         STATUS_REJECTED,
+        STATUS_NEEDS_INFO,  # запрос уточнений менеджером (п. 2.5)
     },
     STATUS_APPROVED: {STATUS_OFFER_READY},
     STATUS_APPROVED_WITH_CHANGES: {STATUS_OFFER_READY},
@@ -86,16 +94,18 @@ class Application:
     score: float | None = None
     decision: str | None = None
     decision_details: dict | None = None
+    client_data: dict | None = None
     id: int | None = None
 
 
 class ApplicationCreateRequest(BaseModel):
-    """Создание заявки: профиль + продукт + параметры"""
+    """Создание заявки: профиль + продукт + параметры + пакет данных клиента"""
     model_config = ConfigDict(extra="forbid")
     profile_id: int
     product_id: int
     requested_amount: float
     term_months: int
+    client_data: ClientDataRequest | None = None
 
 
 class ApplicationUpdateRequest(BaseModel):
@@ -134,5 +144,32 @@ class ApplicationExplainRequest(BaseModel):
         if self.audience not in EXPLAIN_AUDIENCES:
             raise ValueError(
                 f"audience must be one of {EXPLAIN_AUDIENCES} (got: {self.audience!r})"
+            )
+        return self
+
+
+# Решения кредитного аналитика по заявке в ручной экспертизе (п. 2.5)
+ANALYST_DECISIONS = (STATUS_APPROVED, STATUS_APPROVED_WITH_CHANGES, STATUS_REJECTED)
+
+
+class AdminRequestInfoRequest(BaseModel):
+    """Запрос уточнений менеджером банка: data_check|scoring|manual_review -> needs_info"""
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=3, max_length=1000)
+
+
+class AdminDecisionRequest(BaseModel):
+    """Решение кредитного аналитика по заявке в ручной экспертизе (с причиной)"""
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+    @model_validator(mode="after")
+    def check_decision(self):
+        if self.decision not in ANALYST_DECISIONS:
+            raise ValueError(
+                f"decision must be one of {ANALYST_DECISIONS} (got: {self.decision!r})"
             )
         return self

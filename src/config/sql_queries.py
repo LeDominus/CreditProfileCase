@@ -106,18 +106,18 @@ CREATE_APPLICATION_QUERY = """
     INSERT INTO applications (
         profile_id, product_id, product_name, requested_amount, term_months,
         monthly_payment, total_repayment, overpayment, status,
-        score, decision, decision_details, created_at, updated_at
+        score, decision, decision_details, client_data, created_at, updated_at
     ) VALUES (
         :profile_id, :product_id, :product_name, :requested_amount, :term_months,
         :monthly_payment, :total_repayment, :overpayment, :status,
-        :score, :decision, :decision_details, :created_at, :updated_at
+        :score, :decision, :decision_details, :client_data, :created_at, :updated_at
     )
 """
 
 GET_APPLICATION_QUERY = """
     SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
            monthly_payment, total_repayment, overpayment, status,
-           score, decision, decision_details, created_at, updated_at
+           score, decision, decision_details, client_data, created_at, updated_at
     FROM applications
     WHERE id = :id
 """
@@ -125,7 +125,7 @@ GET_APPLICATION_QUERY = """
 GET_PROFILE_APPLICATIONS_QUERY = """
     SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
            monthly_payment, total_repayment, overpayment, status,
-           score, decision, decision_details, created_at, updated_at
+           score, decision, decision_details, client_data, created_at, updated_at
     FROM applications
     WHERE profile_id = :profile_id
     ORDER BY id DESC
@@ -150,6 +150,43 @@ UPDATE_APPLICATION_DETAILS_QUERY = """
         overpayment = :overpayment,
         updated_at = :updated_at
     WHERE id = :id
+"""
+
+GET_ALL_APPLICATIONS_QUERY = """
+    SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
+           monthly_payment, total_repayment, overpayment, status, score, decision,
+           decision_details, client_data, created_at, updated_at
+    FROM applications
+    ORDER BY updated_at DESC, id DESC
+"""
+
+GET_APPLICATIONS_BY_STATUS_QUERY = """
+    SELECT id, profile_id, product_id, product_name, requested_amount, term_months,
+           monthly_payment, total_repayment, overpayment, status, score, decision,
+           decision_details, client_data, created_at, updated_at
+    FROM applications
+    WHERE status = :status
+    ORDER BY updated_at DESC, id DESC
+"""
+
+GET_USER_APPLICATIONS_QUERY = """
+    SELECT a.id, a.profile_id, a.product_id, a.product_name, a.requested_amount, a.term_months,
+           a.monthly_payment, a.total_repayment, a.overpayment, a.status, a.score, a.decision,
+           a.decision_details, a.client_data, a.created_at, a.updated_at
+    FROM applications a
+    JOIN business_profiles p ON p.id = a.profile_id
+    WHERE p.user_id = :user_id
+    ORDER BY a.updated_at DESC, a.id DESC
+"""
+
+GET_LATEST_PROFILE_BY_USER_QUERY = """
+    SELECT id, user_id, business_name, industry, funding_purpose, requested_amount,
+           business_age_months, monthly_revenue, monthly_profit,
+           preferred_term_months, max_monthly_payment, created_at, updated_at
+    FROM business_profiles
+    WHERE user_id = :user_id
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
 """
 
 CREATE_APPLICATION_STATUS_HISTORY_TABLE = """
@@ -195,6 +232,7 @@ CREATE_APPLICATIONS_TABLE = """
         score REAL,
         decision TEXT,
         decision_details TEXT,
+        client_data TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )

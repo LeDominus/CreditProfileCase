@@ -20,3 +20,15 @@ def get_current_user(
             detail="Требуется действительный заголовок Authorization: Bearer <token>",
         )
     return user
+
+
+def require_role(*roles: str):
+    """Фабрика зависимостей: пользователь с одной из указанных ролей, иначе 403."""
+    def dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Требуется одна из ролей: {', '.join(roles)}",
+            )
+        return user
+    return dependency

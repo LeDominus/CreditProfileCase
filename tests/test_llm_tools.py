@@ -1,9 +1,9 @@
-"""Тесты инструментов LLM: LLM оркестрирует, расчёты выполняет код.
+"""Тесты диалогового протокола LLM: merged-JSON (извлечение + ответ + инструменты).
 
-Проверяются: разбор вызова инструмента из ответа LLM, детерминированное
-исполнение расчёта (calculate_annuity_payment), цикл run_with_tools
-(вызов инструмента -> результат в контекст -> финальный ответ) и
-интеграция в конвейер POST /api/conversations/{id}/messages.
+Проверяются: разбор merged-ответа LLM, детерминированное исполнение расчёта
+(calculate_annuity_payment), цикл run_dialogue (вызов инструмента ->
+результат в контекст -> финальный ответ) и интеграция в конвейер
+POST /api/conversations/{id}/messages.
 """
 
 import json
@@ -15,8 +15,8 @@ from src.config.tools_config import MAX_TOOL_CALLS, PAYMENT_TOOL_NAME
 from src.core.llm.tools import (
     execute_tool,
     format_tool_result,
-    parse_tool_call,
-    run_with_tools,
+    parse_dialogue_response,
+    run_dialogue,
 )
 from src.schemas.llm_schema import ToolExecution
 from tests.conftest import ChatStubLLM, authorize_client
@@ -29,7 +29,7 @@ class SequenceStubLLM:
         self.answers = list(answers)
         self.requests: list[list[dict]] = []
 
-    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None, model=None):
         self.requests.append(context)
         return self.answers.pop(0)
 
@@ -46,7 +46,7 @@ class ToolSequenceStubLLM(ChatStubLLM):
         super().__init__(chat_answer=chat_answers[0])
         self.chat_answers = list(chat_answers)
 
-    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None, model=None):
         self.requests.append(context)
         system = context[0]["content"] if context else ""
         if "извлекатель" in system:
@@ -54,16 +54,31 @@ class ToolSequenceStubLLM(ChatStubLLM):
         return self.chat_answers.pop(0)
 
 
-def _tool_reply(amount=2_000_000, annual_rate=18.0, months=24) -> str:
+def _merged_reply(reply="Готово.", updates=None) -> str:
     return json.dumps(
         {
+            "profile_updates": updates or {},
+            "tool": None,
+            "arguments": None,
+            "reply": reply,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _tool_reply(amount=2_000_000, annual_rate=18.0, months=24, updates=None) -> str:
+    return json.dumps(
+        {
+            "profile_updates": updates or {},
             "tool": PAYMENT_TOOL_NAME,
             "arguments": {
                 "amount": amount,
                 "annual_rate": annual_rate,
                 "months": months,
             },
-        }
+            "reply": None,
+        },
+        ensure_ascii=False,
     )
 
 
@@ -74,34 +89,33 @@ def _context() -> list[dict]:
     ]
 
 
-class TestParseToolCall:
-    def test_valid_call(self):
-        call = parse_tool_call(_tool_reply())
-        assert call == {
-            "tool": PAYMENT_TOOL_NAME,
-            "arguments": {"amount": 2_000_000, "annual_rate": 18.0, "months": 24},
+class TestParseDialogueResponse:
+    def test_merged_json_parsed(self):
+        data = parse_dialogue_response(_merged_reply("Ответ", {"industry": "IT"}))
+        assert data == {
+            "profile_updates": {"industry": "IT"},
+            "tool": None,
+            "arguments": None,
+            "reply": "Ответ",
         }
 
+    def test_tool_json_parsed(self):
+        data = parse_dialogue_response(_tool_reply())
+        assert data["tool"] == PAYMENT_TOOL_NAME
+        assert data["arguments"]["amount"] == 2_000_000
+
     def test_fenced_json(self):
-        assert parse_tool_call(f"```json\n{_tool_reply()}\n```") is not None
+        assert parse_dialogue_response(f"```json\n{_merged_reply()}\n```") is not None
 
-    def test_missing_arguments_defaults_to_empty(self):
-        call = parse_tool_call('{"tool": "calculate_payment"}')
-        assert call == {"tool": PAYMENT_TOOL_NAME, "arguments": {}}
+    def test_prose_is_not_json(self):
+        assert parse_dialogue_response("Платёж составит около 90 000 руб. в месяц.") is None
 
-    def test_prose_is_not_a_call(self):
-        assert parse_tool_call("Платёж составит около 90 000 руб. в месяц.") is None
-
-    def test_json_without_tool_key_is_not_a_call(self):
-        # ответ извлекателя профиля не должен считаться вызовом инструмента
-        assert parse_tool_call('{"funding_purpose": "развитие бизнеса"}') is None
-
-    def test_broken_json_is_not_a_call(self):
-        assert parse_tool_call('{"tool": "calculate_payment", ') is None
+    def test_broken_json(self):
+        assert parse_dialogue_response('{"tool": "calculate_payment", ') is None
 
     def test_empty_reply(self):
-        assert parse_tool_call("") is None
-        assert parse_tool_call(None) is None
+        assert parse_dialogue_response("") is None
+        assert parse_dialogue_response(None) is None
 
 
 class TestExecuteTool:
@@ -162,52 +176,76 @@ class TestFormatToolResult:
         )
 
 
-class TestRunWithTools:
-    def test_plain_reply_returned_as_is(self):
+class TestRunDialogue:
+    def test_merged_reply_single_request(self):
+        llm = SequenceStubLLM(
+            [_merged_reply("Ответ ассистента.", {"industry": "общепит"})]
+        )
+        result = run_dialogue(llm, _context())
+        assert result == {
+            "reply": "Ответ ассистента.",
+            "profile_updates": {"industry": "общепит"},
+            "parsed": True,
+        }
+        assert len(llm.requests) == 1
+
+    def test_plain_reply_degrades_gracefully(self):
         llm = SequenceStubLLM(["Обычный ответ без расчёта."])
-        assert run_with_tools(llm, _context()) == "Обычный ответ без расчёта."
+        result = run_dialogue(llm, _context())
+        # модель нарушила формат: текст целиком — ответ, поля не извлечены
+        assert result == {
+            "reply": "Обычный ответ без расчёта.",
+            "profile_updates": {},
+            "parsed": False,
+        }
         assert len(llm.requests) == 1
 
     def test_tool_call_then_final_reply(self):
-        llm = SequenceStubLLM([_tool_reply(), "Платёж 99 842 руб. в месяц."])
-        result = run_with_tools(llm, _context())
-        assert result == "Платёж 99 842 руб. в месяц."
+        first = _tool_reply(updates={"requested_amount": 2_000_000})
+        llm = SequenceStubLLM(
+            [first, _merged_reply("Платёж 99 842 руб. в месяц.")]
+        )
+        result = run_dialogue(llm, _context())
+        assert result["reply"] == "Платёж 99 842 руб. в месяц."
+        # поля из обоих ответов объединяются
+        assert result["profile_updates"] == {"requested_amount": 2_000_000}
+        assert result["parsed"] is True
         assert len(llm.requests) == 2
 
         second = llm.requests[1]
-        # system-промпт дополнен правилами инструментов
+        # system-промпт дополнен форматом ответа
         assert second[0]["role"] == "system"
         assert PAYMENT_TOOL_NAME in second[0]["content"]
         # в контекст добавлены вызов инструмента и результат расчёта
         assert second[-2]["role"] == "assistant"
-        assert second[-2]["content"] == _tool_reply()
+        assert second[-2]["content"] == first
         assert second[-1]["role"] == "user"
         assert "monthly_payment" in second[-1]["content"]
         assert "не пересчитывай" in second[-1]["content"]
 
     def test_error_result_fed_back_to_llm(self):
         llm = SequenceStubLLM(
-            [_tool_reply(amount=None), "Уточните сумму и ставку, пожалуйста."]
+            [_tool_reply(amount=None), _merged_reply("Уточните сумму и ставку, пожалуйста.")]
         )
-        result = run_with_tools(llm, _context())
-        assert result == "Уточните сумму и ставку, пожалуйста."
+        result = run_dialogue(llm, _context())
+        assert result["reply"] == "Уточните сумму и ставку, пожалуйста."
         assert '"status": "error"' in llm.requests[1][-1]["content"]
 
     def test_limit_reached_fallback_without_llm(self):
         llm = SequenceStubLLM([_tool_reply()] * 10)
-        result = run_with_tools(llm, _context(), max_tool_calls=2)
+        result = run_dialogue(llm, _context(), max_tool_calls=2)
         # лимит вызовов: 2 расчёта + 1 финальный запрос, дальше — fallback кода
         assert len(llm.requests) == 3
-        assert "Ежемесячный платёж" in result
-        assert "руб." in result
+        assert "Ежемесячный платёж" in result["reply"]
+        assert "руб." in result["reply"]
 
     def test_default_limit(self):
         assert MAX_TOOL_CALLS == 3
 
     def test_original_context_not_mutated(self):
-        llm = SequenceStubLLM([_tool_reply(), "Готово."])
+        llm = SequenceStubLLM([_tool_reply(), _merged_reply("Готово.")])
         context = _context()
-        run_with_tools(llm, context)
+        run_dialogue(llm, context)
         assert context[0]["content"] == "Ты — ассистент банка."
         assert len(context) == 2
 

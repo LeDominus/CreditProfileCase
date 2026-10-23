@@ -1,9 +1,10 @@
 """Unit-тесты: извлечение контекста и структурированных полей профиля."""
 
+from src.config.llm_config import EXTRACTION_TEMPERATURE, MODEL_EXTRACTION
 from src.core.llm.utils import (
-    EXTRACTION_TEMPERATURE,
     extract_profile_fields,
     parse_profile_fields,
+    validate_profile_fields,
 )
 from src.schemas.conversation_schema import Message
 
@@ -158,6 +159,22 @@ class TestParseProfileFields:
         assert parse_profile_fields("") == {}
 
 
+class TestValidateProfileFields:
+    def test_dict_input(self):
+        assert validate_profile_fields(
+            {"requested_amount": 1500000, "unknown_field": 1}
+        ) == {"requested_amount": 1500000.0}
+
+    def test_duration_string_converted(self):
+        assert validate_profile_fields({"business_age_months": "2 года"}) == {
+            "business_age_months": 24
+        }
+
+    def test_non_dict_input(self):
+        assert validate_profile_fields(None) == {}
+        assert validate_profile_fields([1, 2]) == {}
+
+
 class TestExtractProfileFields:
     def test_end_to_end_with_stub(self, stub_llm):
         stub_llm.answer = '{"requested_amount": 2000000, "preferred_term_months": 24}'
@@ -172,12 +189,18 @@ class TestExtractProfileFields:
         assert "industry=IT" in ctx[0]["content"]
         assert ctx[-1] == {"role": "user", "content": "нужно 2 млн на 24 месяца"}
 
-    def test_extraction_disables_reasoning(self, stub_llm):
-        """Извлечение полей: reasoning_effort='none', температура фиксированная."""
+    def test_extraction_uses_low_reasoning(self, stub_llm):
+        """Извлечение полей: reasoning_effort='low' (минимум для Yandex API), температура фиксированная."""
         stub_llm.answer = '{"industry": "общепит"}'
         extract_profile_fields("работаю в общепите", stub_llm)
-        assert stub_llm.kwargs[0]["reasoning_effort"] == "none"
+        assert stub_llm.kwargs[0]["reasoning_effort"] == "low"
         assert stub_llm.kwargs[0]["temperature"] == EXTRACTION_TEMPERATURE
+
+    def test_extraction_uses_extraction_model(self, stub_llm):
+        """Извлечение полей идёт на модель для экстракции, не на диалоговую."""
+        stub_llm.answer = '{"industry": "общепит"}'
+        extract_profile_fields("работаю в общепите", stub_llm)
+        assert stub_llm.kwargs[0]["model"] == MODEL_EXTRACTION
 
     def test_empty_message(self, stub_llm):
         assert extract_profile_fields("   ", stub_llm) == {}
