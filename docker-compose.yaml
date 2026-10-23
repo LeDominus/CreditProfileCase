@@ -19,17 +19,18 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Next.js frontend (front/). The legacy Streamlit UI in frontend/ stays in
+  # the repo as a demo fallback but is no longer part of the compose stack.
   frontend:
     build:
-      context: .
-      dockerfile: frontend/Dockerfile
+      context: ./front
+      args:
+        # Baked into rewrites at image build time (dist/routes-manifest.json).
+        BACKEND_URL: http://backend:5555
     container_name: credit-frontend
     depends_on:
       backend:
         condition: service_healthy
-    environment:
-      API_BASE_URL: http://backend:5555
-      DEMO_MODE: "false"
     ports:
-      - "${FRONTEND_PORT:-8501}:8501"
+      - "${FRONTEND_PORT:-8502}:8502"
     restart: unless-stopped
