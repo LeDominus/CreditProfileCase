@@ -11,8 +11,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  deploy-frontend:
+    name: Deploy frontend to VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute remote SSH commands
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          key: ${{ secrets.SSH_KEY }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script_stop: true
+          script: |
+            set -e
+            PROJECT_DIR="${{ secrets.PROJECT_DIR }}"
+            REPO="https://github.com/LeDominus/CreditProfileCase.git"
+            FRONTEND_PORT="${FRONTEND_PORT:-8502}"
+
+            mkdir -p "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
+            if [ ! -d .git ]; then
+              echo "First deploy: initializing repository..."
+              git init -q
+              git remote add origin "$REPO" 2>/dev/null || git remote set-url origin "$REPO"
+            fi
+            git fetch origin master
+            git reset --hard origin/master
+
+            if [ ! -f .env ]; then
+              echo "ERROR: $PROJECT_DIR/.env not found."
+              echo "Create it first: YANDEX_API_KEY, YANDEX_FOLDER, MODEL_NAME, BASE_URL, TEMPERATURE, ..."
+              exit 1
+            fi
+
+            # --no-deps: frontend goes live before backend (deploy chain:
+            # frontend -> backend tests -> backend); backend is built and
+            # started by its own stage and must not be built twice.
+            docker compose up -d --build --no-deps frontend
+
+            # Health-check: Next.js answers on / (a redirect to /login is
+            # fine — curl -f fails only on HTTP >= 400).
+            for i in $(seq 1 15); do
+              if curl -fsS -o /dev/null "http://localhost:$FRONTEND_PORT/"; then
+                echo "Frontend deploy OK: / responds."
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "ERROR: frontend did not respond after deploy. Last frontend logs:"
+            docker compose logs --tail=50 frontend
+            exit 1
+
+
   tests:
     name: Backend tests
+    needs: deploy-frontend
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,7 +86,7 @@ jobs:
         run: python -m pytest tests -q
 
   deploy:
-    name: Deploy to VPS
+    name: Deploy backend to VPS
     needs: tests
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +121,8 @@ jobs:
               exit 1
             fi
 
-            docker compose up -d --build
+            # Frontend is already up (deploy-frontend stage) — build backend only.
+            docker compose up -d --build backend
             docker image prune -f
 
             # 4. Post-deploy health-check: /health должен ответить за ~75 сек.
