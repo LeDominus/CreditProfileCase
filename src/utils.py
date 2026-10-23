@@ -14,11 +14,6 @@ from src.config.llm_config import PROFILE_FIELDS
 from src.schemas.profile_schema import BusinessProfile
 
 
-FALLBACK_REPLY = (
-    "Сообщение принято. Ассистент временно недоступен — "
-    "продолжу помогать, как только связь восстановится."
-)
-
 def get_product(product_id: int) -> dict | None:
     """Продукт из каталога по id."""
     return next((p for p in PRODUCTS if p["id"] == product_id), None)

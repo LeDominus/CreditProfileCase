@@ -30,7 +30,6 @@ jobs:
       - name: Run tests
         run: python -m pytest tests -q
 
-
   deploy:
     name: Deploy to VPS
     needs: tests

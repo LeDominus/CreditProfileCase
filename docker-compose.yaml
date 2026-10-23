@@ -21,15 +21,13 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: frontend/Dockerfile
+      context: ./front
+      args:
+        BACKEND_URL: http://backend:5555
     container_name: credit-frontend
     depends_on:
       backend:
         condition: service_healthy
-    environment:
-      API_BASE_URL: http://backend:5555
-      DEMO_MODE: "false"
     ports:
-      - "${FRONTEND_PORT:-8501}:8501"
+      - "${FRONTEND_PORT:-8502}:8502"
     restart: unless-stopped

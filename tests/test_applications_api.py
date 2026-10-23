@@ -496,7 +496,7 @@ class TestExplainEndpoint:
         application = self.rejected_application(client)
 
         class FailingLLM(ChatStubLLM):
-            def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+            def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None, model=None):
                 raise RuntimeError("LLM unavailable")
 
         client.app.state.llmAPI = FailingLLM()

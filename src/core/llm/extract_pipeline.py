@@ -3,15 +3,16 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from src.schemas.llm_schema import ContractExtraction
 from src.config.llm_config import REQUIRED_PROFILE_FIELDS
-from src.core.llm.utils import extract_profile_fields
+from src.core.llm.utils import extract_profile_fields, validate_profile_fields
 from src.core.recommendations import recommend_products
 from src.core.llm.LLMApi import LLMApi
-from src.core.llm.tools import run_with_tools
+from src.core.llm.tools import run_dialogue
 from src.core.profile import ProfileRepository
 from src.schemas.conversation_schema import ConversationCreateMessage, Message
 from src.schemas.profile_schema import BusinessProfile
 from src.core.conversations import ConversationRepository
-from src.utils import FALLBACK_REPLY, get_profile_or_404, profile_to_dict
+from src.config.prompt import FALLBACK_REPLY
+from src.utils import get_profile_or_404, profile_to_dict
 
 
 def extract_content(
@@ -25,31 +26,34 @@ def extract_content(
     
     
     profile: BusinessProfile | None = None
-    profile_updates: dict = {}
     if payload.profile_id is not None:
         profile = get_profile_or_404(profile_rep, payload.profile_id)
-        profile_updates = extract_profile_fields(
-            payload.content, llm, profile_to_dict(profile)
-        )
-        if profile_updates:
-            updated = replace(profile, **profile_updates)
-            updated.updated_at = datetime.now(timezone.utc)
-            profile_rep.update_profile(updated)
-            profile = profile_rep.get_profile(profile.id)
-
     profile_dict = profile_to_dict(profile) if profile is not None else None
+
     history = conv_rep.get_conversation_messages(conversation_id)
     context = llm.extract_context(
         messages=history, profile=profile_dict, require_complete_profile=True
     )
     try:
-        reply = run_with_tools(llm, context)
+        result = run_dialogue(llm, context)
     except Exception:
-        reply = ""
-    if not reply or not reply.strip():
+        result = {"reply": "", "profile_updates": {}, "parsed": False}
+
+    profile_updates = validate_profile_fields(result.get("profile_updates"))
+    if profile is not None and not result.get("parsed"):
+        # модель нарушила JSON-формат ответа — запасное извлечение полей
+        # отдельным запросом на модели для экстракции
+        profile_updates = extract_profile_fields(payload.content, llm, profile_dict)
+    if profile is not None and profile_updates:
+        updated = replace(profile, **profile_updates)
+        updated.updated_at = datetime.now(timezone.utc)
+        profile_rep.update_profile(updated)
+        profile = profile_rep.get_profile(profile.id)
+        profile_dict = profile_to_dict(profile)
+
+    reply = str(result.get("reply") or "").strip()
+    if not reply:
         reply = FALLBACK_REPLY
-    else:
-        reply = reply.strip()
     assistant_message = Message(
         conversation_id=conversation_id,
         role="assistant",
@@ -57,9 +61,6 @@ def extract_content(
     )
     assistant_message_id = conv_rep.send_conversation_message(assistant_message)
 
-    # Подбор открывается ровно в тот момент, когда ассистент собрал все данные:
-    # сумма, срок и обязательные параметры бизнеса (срок работы, выручка, прибыль).
-    # До этого конвейер не возвращает рекомендации — продукты недоступны «в обход» диалога.
     recommendation_required_fields = (
         "requested_amount",
         "preferred_term_months",

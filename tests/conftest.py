@@ -78,13 +78,14 @@ class StubLLM(LLMApi):
         self.requests: list[list[dict]] = []
         self.kwargs: list[dict] = []
 
-    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None, model=None):
         self.requests.append(context)
         self.kwargs.append(
             {
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
+                "model": model,
             }
         )
         return self.answer
@@ -104,7 +105,7 @@ class ChatStubLLM(LLMApi):
         self.chat_answer = chat_answer
         self.requests: list[list[dict]] = []
 
-    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None):
+    def complete(self, context, temperature=None, max_tokens=None, reasoning_effort=None, model=None):
         self.requests.append(context)
         system = context[0]["content"] if context else ""
         if "извлекатель" in system:

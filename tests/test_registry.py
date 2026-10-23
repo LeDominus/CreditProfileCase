@@ -1,10 +1,10 @@
-"""Тесты реестра компаний по ИНН и пакета данных клиента в заявке."""
+﻿"""Тесты реестра компаний по ИНН и пакета данных клиента в заявке."""
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from src.config.registry import REGISTRY_ENTRIES
+from src.database.registry import REGISTRY_ENTRIES
 from src.core.registry import get_registry_entry
 from src.schemas.profile_schema import ClientDataRequest
 from tests.conftest import authorize_client

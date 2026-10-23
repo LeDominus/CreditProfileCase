@@ -1,5 +1,6 @@
 """Каталог кредитных продуктов (пока грубый и моковый)"""
 MAX_ALTERNATIVE_PRODUCTS = 2
+MAX_RECOMMEND_PRODUCTS = 3
 
 PRODUCTS = [
     {

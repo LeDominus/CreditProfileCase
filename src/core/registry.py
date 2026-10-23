@@ -1,4 +1,4 @@
-from src.config.registry import REGISTRY_ENTRIES
+from src.database.registry import REGISTRY_ENTRIES
 
 
 def get_registry_entry(inn: str) -> dict | None:
